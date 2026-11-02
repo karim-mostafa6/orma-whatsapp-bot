@@ -17,7 +17,15 @@ import qrcodeTerminal from 'qrcode-terminal';
  * @param {object} opts.logger
  * @param {(sock:object)=>void} opts.onSocket بيتنادى مع كل socket جديد (عشان نربط استقبال الرسايل)
  */
-export function createWhatsApp({ authDir, logger, onSocket }) {
+export function createWhatsApp({ authDir, logger, onSocket, authProvider = null }) {
+  // افتراضياً الجلسة في فولدر auth/. على Render بتتحفظ في Supabase (authProvider)
+  const loadAuth =
+    authProvider ||
+    (async () => {
+      const { state, saveCreds } = await useMultiFileAuthState(authDir);
+      return { state, saveCreds, clear: async () => fs.rmSync(authDir, { recursive: true, force: true }) };
+    });
+  let clearAuth = async () => {};
   const baileysLogger = pino({ level: 'error' }); // لوج Baileys نفسه كتير جداً
   let sock = null;
   let retries = 0;
@@ -35,7 +43,8 @@ export function createWhatsApp({ authDir, logger, onSocket }) {
   async function connect() {
     clearTimeout(reconnectTimer);
     const gen = ++generation;
-    const { state: authState, saveCreds } = await useMultiFileAuthState(authDir);
+    const { state: authState, saveCreds, clear } = await loadAuth();
+    clearAuth = clear;
 
     let version;
     try {
@@ -79,10 +88,13 @@ export function createWhatsApp({ authDir, logger, onSocket }) {
         const code = lastDisconnect?.error?.output?.statusCode;
         if (code === DisconnectReason.loggedOut) {
           logger.warn('🚪 الجهاز اتشال من "الأجهزة المرتبطة". هنطلع QR جديد...');
-          fs.rmSync(authDir, { recursive: true, force: true });
           retries = 0;
           setStatus({ connection: 'connecting', qr: null, me: null });
-          reconnectTimer = setTimeout(connect, 1000);
+          clearAuth()
+            .catch((err) => logger.error({ err }, 'مسح الجلسة'))
+            .finally(() => {
+              reconnectTimer = setTimeout(connect, 1000);
+            });
           return;
         }
         // أي فصل تاني (نت، سيرفر، restart مطلوب) → نعيد الاتصال مع زيادة وقت الانتظار تدريجياً
@@ -103,7 +115,7 @@ export function createWhatsApp({ authDir, logger, onSocket }) {
       await sock?.logout();
     } catch {
       // لو مش متصل أصلاً، نمسح الجلسة ونبدأ من جديد
-      fs.rmSync(authDir, { recursive: true, force: true });
+      await clearAuth();
       setStatus({ connection: 'connecting', qr: null, me: null });
       await connect();
     }

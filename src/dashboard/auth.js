@@ -8,10 +8,12 @@ import path from 'node:path';
 const COOKIE = 'orma_session';
 const MAX_AGE_S = 30 * 24 * 3600;
 
-export function createAuth({ password, dataDir, secure, trustProxy = false }) {
+export function createAuth({ password, dataDir, secure, trustProxy = false, secret = '' }) {
   let secretFile = null;
   let fileSecret = crypto.randomBytes(32).toString('hex');
-  if (dataDir) {
+  if (secret) {
+    fileSecret = secret; // من متغير بيئة (Render): الجلسات بتفضل شغالة بعد أي restart
+  } else if (dataDir) {
     secretFile = path.join(dataDir, 'session.key');
     try {
       fileSecret = fs.readFileSync(secretFile, 'utf8').trim() || fileSecret;

@@ -249,10 +249,15 @@ export function createDashboard({ whatsapp, db, engine, auth, allowedHosts = [],
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Referrer-Policy', 'no-referrer');
+    const url = new URL(req.url, 'http://localhost');
+    // فحص سريع (من غير دخول ومن أي Host): Render وزيارات "ما تنامش" بتستخدمه، ومافيهوش أي بيانات
+    if (url.pathname === '/api/health' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      return res.end('{"ok":true}');
+    }
+
     // حماية: نقبل بس الدومين بتاعنا (ضد هجمات DNS rebinding)
     if (!hostAllowed(req.headers.host)) return res.writeHead(403).end('Forbidden');
-
-    const url = new URL(req.url, 'http://localhost');
     if (!url.pathname.startsWith('/api/')) return req.method === 'GET' ? serveStatic(url, res) : res.writeHead(405).end();
 
     const send = (status, data, headers = {}) => {

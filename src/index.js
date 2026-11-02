@@ -9,6 +9,8 @@ import { createHandler } from './handler.js';
 import { createWhatsApp } from './whatsapp.js';
 import { createAuth } from './dashboard/auth.js';
 import { createDashboard, listen } from './dashboard/server.js';
+import { createSupabaseKv } from './storage/supabaseKv.js';
+import { useKvAuthState } from './storage/kvAuth.js';
 
 const config = loadConfig();
 
@@ -20,18 +22,34 @@ const logger = createLogger(config.logLevel, (entry) => {
   if (activity.length > 100) activity.pop();
 });
 
-const db = createDb(config.dataDir);
+// على Render: كل حاجة (الجلسة والبيانات) بتتحفظ في Supabase، لأن Render بيمسح الملفات مع كل restart
+let kv = null;
+let kvData = new Map();
+if (config.supabaseUrl) {
+  kv = createSupabaseKv({ url: config.supabaseUrl, key: config.supabaseKey, token: config.supabaseToken, logger });
+  try {
+    await kv.check();
+    kvData = await kv.loadAll('data:');
+    logger.info('🗄️ البيانات والجلسة بتتحفظ في Supabase');
+  } catch (err) {
+    logger.fatal(`❌ مش قادر أوصل لـ Supabase: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+const db = createDb(config.dataDir, { kv, kvData });
 if (db.isNew) {
   // أول تشغيل: نحوّل الردود القديمة (faq.json) لـ Flows جاهزة
   const seed = readFaqSeed(config.faqFile);
   if (!db.getSettings()) db.setSettings(defaultSettings(config, seed));
   if (!db.listFlows().length) db.setFlows(defaultFlows(seed));
-  db.flush();
+  await db.flush();
   logger.info(`✨ أول تشغيل: اتعمل ${db.listFlows().length} Flow جاهز من الردود القديمة`);
 }
 
 const whatsapp = createWhatsApp({
   authDir: config.authDir,
+  authProvider: kv ? () => useKvAuthState(kv) : null,
   logger,
   onSocket: (sock) => sock.ev.on('messages.upsert', handler.onMessagesUpsert),
 });
@@ -46,7 +64,7 @@ const handler = createHandler({
 // التأخيرات والأسئلة اللي العميل ما ردش عليها
 setInterval(() => handler.tick().catch((err) => logger.error({ err }, 'tick')), 10_000).unref();
 
-const auth = createAuth({ password: config.adminPassword, dataDir: config.dataDir, secure: Boolean(config.publicHost), trustProxy: config.trustProxy });
+const auth = createAuth({ password: config.adminPassword, dataDir: config.dataDir, secure: Boolean(config.publicHost), trustProxy: config.trustProxy, secret: config.sessionSecret });
 
 let version = '';
 try {
@@ -79,10 +97,10 @@ function openBrowser(url) {
   }
 }
 
-function shutdown(signal) {
+async function shutdown(signal) {
   logger.info(`${signal}: بنقفل البوت...`);
-  db.flush();
   whatsapp.stop();
+  await Promise.race([db.flush(), new Promise((r) => setTimeout(r, 8000))]); // Supabase: نستنى الحفظ
   process.exit(0);
 }
 process.on('SIGINT', () => shutdown('SIGINT'));
@@ -98,6 +116,13 @@ try {
   console.log(`================================================\n`);
   if (config.openBrowser && !config.publicHost) openBrowser(url);
   await whatsapp.start();
+
+  // Render المجاني بينام لو مفيش زيارات 15 دقيقة، فالبوت بيزور نفسه
+  if (config.keepAliveUrl) {
+    const ping = () => fetch(config.keepAliveUrl, { signal: AbortSignal.timeout(15_000) }).catch(() => {});
+    setInterval(ping, config.keepAliveMinutes * 60_000).unref();
+    logger.info(`⏰ البوت هيزور نفسه كل ${config.keepAliveMinutes} دقايق عشان ما ينامش`);
+  }
 } catch (err) {
   logger.fatal({ err }, 'البوت ما قدرش يبدأ');
   process.exit(1);
