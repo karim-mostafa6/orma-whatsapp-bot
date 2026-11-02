@@ -3,6 +3,9 @@ chcp 65001 >nul
 title ORMA WhatsApp Bot - leave this window open
 cd /d "%~dp0"
 
+rem The ready-made Windows package ships its own Node.js in the node folder
+if exist "%~dp0node\node.exe" set "PATH=%~dp0node;%PATH%"
+
 where node >nul 2>nul
 if errorlevel 1 goto install_node
 
