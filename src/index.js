@@ -1,14 +1,14 @@
-// نقطة التشغيل: بتشغّل البوت + صفحة التحكم، وبتفتح الصفحة في المتصفح لوحدها.
+// نقطة التشغيل: البوت + صفحة التحكم.
 import { spawn } from 'node:child_process';
 import { loadConfig } from './config.js';
 import { createLogger } from './logger.js';
-import { watchFaq } from './faq.js';
-import { ChatState } from './state.js';
+import { createDb } from './db.js';
+import { createEngine } from './flows/engine.js';
+import { defaultFlows, defaultSettings, readFaqSeed } from './flows/defaults.js';
 import { createHandler } from './handler.js';
 import { createWhatsApp } from './whatsapp.js';
+import { createAuth } from './dashboard/auth.js';
 import { createDashboard, listen } from './dashboard/server.js';
-import { createKeywordResponder } from './responders/keyword.js';
-import { createLlmResponder, createHybridResponder } from './responders/llm.js';
 
 const config = loadConfig();
 
@@ -20,29 +20,39 @@ const logger = createLogger(config.logLevel, (entry) => {
   if (activity.length > 100) activity.pop();
 });
 
-const faq = watchFaq(config.faqFile, logger);
-const state = new ChatState(config.stateFile);
+const db = createDb(config.dataDir);
+if (db.isNew) {
+  // أول تشغيل: نحوّل الردود القديمة (faq.json) لـ Flows جاهزة
+  const seed = readFaqSeed(config.faqFile);
+  if (!db.getSettings()) db.setSettings(defaultSettings(config, seed));
+  if (!db.listFlows().length) db.setFlows(defaultFlows(seed));
+  db.flush();
+  logger.info(`✨ أول تشغيل: اتعمل ${db.listFlows().length} Flow جاهز من الردود القديمة`);
+}
 
-const keywordResponder = createKeywordResponder();
-const responder =
-  config.responder === 'hybrid'
-    ? createHybridResponder(keywordResponder, createLlmResponder(config.llm), logger)
-    : keywordResponder;
-
-let handler = null;
 const whatsapp = createWhatsApp({
   authDir: config.authDir,
   logger,
   onSocket: (sock) => sock.ev.on('messages.upsert', handler.onMessagesUpsert),
 });
-handler = createHandler({ getSock: whatsapp.getSock, faq, state, responder, config, logger });
+const handler = createHandler({
+  getSock: whatsapp.getSock,
+  db,
+  makeEngine: (transport) => createEngine({ db, transport, logger }),
+  config,
+  logger,
+});
 
+// التأخيرات والأسئلة اللي العميل ما ردش عليها
+setInterval(() => handler.tick().catch((err) => logger.error({ err }, 'tick')), 10_000).unref();
+
+const auth = createAuth({ password: config.adminPassword, dataDir: config.dataDir, secure: Boolean(config.publicHost) });
 const dashboard = createDashboard({
   whatsapp,
-  faq,
-  faqFile: config.faqFile,
-  state,
-  responder,
+  db,
+  engine: handler.engine,
+  auth,
+  allowedHosts: config.publicHost ? [config.publicHost] : [],
   getActivity: () => activity,
   logger,
 });
@@ -63,7 +73,7 @@ function openBrowser(url) {
 
 function shutdown(signal) {
   logger.info(`${signal}: بنقفل البوت...`);
-  state.flush();
+  db.flush();
   whatsapp.stop();
   process.exit(0);
 }
@@ -72,12 +82,13 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('unhandledRejection', (err) => logger.error({ err }, 'unhandledRejection'));
 
 try {
-  const port = await listen(dashboard, config.dashboardPort, logger);
+  const port = await listen(dashboard, config.dashboardPort, config.bindHost, logger);
+  const url = config.publicHost ? `https://${config.publicHost}` : `http://localhost:${port}`;
   console.log(`\n================================================`);
-  console.log(`  افتح صفحة التحكم:  http://localhost:${port}`);
-  console.log(`  سيب الشباك ده مفتوح — لو قفلته البوت هيقف`);
+  console.log(`  افتح صفحة التحكم:  ${url}`);
+  if (!config.publicHost) console.log(`  سيب الشباك ده مفتوح — لو قفلته البوت هيقف`);
   console.log(`================================================\n`);
-  if (config.openBrowser) openBrowser(`http://localhost:${port}`);
+  if (config.openBrowser && !config.publicHost) openBrowser(url);
   await whatsapp.start();
 } catch (err) {
   logger.fatal({ err }, 'البوت ما قدرش يبدأ');

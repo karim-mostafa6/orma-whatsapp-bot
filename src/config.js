@@ -22,8 +22,8 @@ const file = (name, def) => path.resolve(ROOT, process.env[name] || def);
 export function loadConfig() {
   const cfg = {
     authDir: file('AUTH_DIR', 'auth'),
-    faqFile: file('FAQ_FILE', 'data/faq.json'),
-    stateFile: file('STATE_FILE', 'data/state.json'),
+    dataDir: file('DATA_DIR', 'data'),
+    faqFile: file('FAQ_FILE', 'data/faq.json'), // الردود القديمة: بتتحوّل لـ Flows أول مرة بس
 
     minDelayMs: num('MIN_DELAY_MS', 2000),
     maxDelayMs: num('MAX_DELAY_MS', 4000),
@@ -31,29 +31,26 @@ export function loadConfig() {
 
     handoffHours: num('HANDOFF_HOURS', 12),
     ownerReplyPauseHours: num('OWNER_REPLY_PAUSE_HOURS', 12),
-    unmatchedBeforeHandoff: num('UNMATCHED_BEFORE_HANDOFF', 2),
     maxRepliesPerMinute: num('MAX_REPLIES_PER_MINUTE', 4),
     maxMessageAgeMinutes: num('MAX_MESSAGE_AGE_MINUTES', 60),
     notifyOwner: bool('NOTIFY_OWNER', true),
     deleteOwnerCommands: bool('DELETE_OWNER_COMMANDS', true),
 
-    responder: (process.env.RESPONDER || 'keyword').toLowerCase(),
-    llm: {
-      baseUrl: process.env.LLM_BASE_URL || '',
-      apiKey: process.env.LLM_API_KEY || '',
-      model: process.env.LLM_MODEL || '',
-    },
 
     dashboardPort: num('DASHBOARD_PORT', 3000),
     openBrowser: bool('OPEN_BROWSER', true),
+    // على السيرفر: BIND_HOST=0.0.0.0 أو ورا Caddy على 127.0.0.1، و PUBLIC_HOST = الدومين
+    bindHost: process.env.BIND_HOST || '127.0.0.1',
+    publicHost: (process.env.PUBLIC_HOST || '').trim().toLowerCase(),
+    adminPassword: process.env.ADMIN_PASSWORD || '',
 
     logLevel: process.env.LOG_LEVEL || 'info',
   };
 
   if (cfg.maxDelayMs < cfg.minDelayMs) throw new Error('MAX_DELAY_MS لازم يكون أكبر من أو يساوي MIN_DELAY_MS');
-  if (!['keyword', 'hybrid'].includes(cfg.responder)) throw new Error('RESPONDER لازم يكون keyword أو hybrid');
-  if (cfg.responder === 'hybrid' && !(cfg.llm.baseUrl && cfg.llm.apiKey && cfg.llm.model)) {
-    throw new Error('RESPONDER=hybrid محتاج LLM_BASE_URL و LLM_API_KEY و LLM_MODEL في .env');
+  const loopback = ['127.0.0.1', 'localhost', '::1'].includes(cfg.bindHost);
+  if ((!loopback || cfg.publicHost) && cfg.adminPassword.length < 8) {
+    throw new Error('صفحة التحكم مفتوحة للنت: لازم ADMIN_PASSWORD في .env (8 حروف على الأقل)');
   }
   return cfg;
 }

@@ -7,9 +7,9 @@ if ! command -v node >/dev/null 2>&1; then
   read -r -p "Press Enter to close..."
   exit 1
 fi
-if [ ! -d node_modules/@whiskeysockets/baileys ]; then
+if [ ! -d node_modules/@whiskeysockets/baileys ] || [ ! -f web/dist/index.html ]; then
   echo "First run: downloading what the bot needs (one time only)..."
-  npm install --omit=dev --no-audit --no-fund || { read -r -p "Download failed. Check the internet and try again. Press Enter..."; exit 1; }
+  npm install --no-audit --no-fund && npm run build || { read -r -p "Download failed. Check the internet and try again. Press Enter..."; exit 1; }
 fi
 echo "KEEP THIS WINDOW OPEN. If you close it, the bot stops replying."
 while true; do

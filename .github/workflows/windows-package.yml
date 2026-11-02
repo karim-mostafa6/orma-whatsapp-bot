@@ -32,13 +32,16 @@ jobs:
         run: |
           npm ci --no-audit --no-fund
           npm test
+          npm run build
 
       - name: Build the package folder
         shell: pwsh
         run: |
           $out = "ORMA-Bot"
           New-Item -ItemType Directory $out | Out-Null
-          Copy-Item -Recurse -Path src, data, scripts -Destination $out
+          Copy-Item -Recurse -Path src, data -Destination $out
+          New-Item -ItemType Directory "$out/web" | Out-Null
+          Copy-Item -Recurse -Path web/dist -Destination "$out/web/dist"
           Copy-Item -Path package.json, package-lock.json, START-BOT.bat, START-WITH-WINDOWS.bat, README.md, .env.example -Destination $out
           Push-Location $out
           npm ci --omit=dev --no-audit --no-fund
@@ -54,7 +57,7 @@ jobs:
           New-Item -ItemType Directory $tmp | Out-Null
           $env:OPEN_BROWSER = "false"
           $env:AUTH_DIR = Join-Path $tmp "auth"
-          $env:STATE_FILE = Join-Path $tmp "state.json"
+          $env:DATA_DIR = Join-Path $tmp "data"
           $p = Start-Process -FilePath "ORMA-Bot/node/node.exe" -ArgumentList "src/index.js" -WorkingDirectory "ORMA-Bot" -PassThru `
                  -RedirectStandardOutput (Join-Path $tmp "out.log") -RedirectStandardError (Join-Path $tmp "err.log")
           $page = $false; $qr = $false
@@ -80,7 +83,7 @@ jobs:
         shell: pwsh
         run: |
           # نتأكد إن مفيش جلسة أو حالة اتعملت بالغلط جوه الباكدج
-          Remove-Item -Recurse -Force ORMA-Bot/auth, ORMA-Bot/data/state.json -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force ORMA-Bot/auth, ORMA-Bot/data/settings.json, ORMA-Bot/data/flows.json, ORMA-Bot/data/contacts.json, ORMA-Bot/data/runs.json, ORMA-Bot/data/session.key -ErrorAction SilentlyContinue
           Compress-Archive -Path ORMA-Bot -DestinationPath ORMA-Bot-Windows.zip
           "{0:N1} MB" -f ((Get-Item ORMA-Bot-Windows.zip).Length / 1MB)
 

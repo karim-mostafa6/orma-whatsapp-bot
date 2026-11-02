@@ -9,11 +9,13 @@ if exist "%~dp0node\node.exe" set "PATH=%~dp0node;%PATH%"
 where node >nul 2>nul
 if errorlevel 1 goto install_node
 
-if exist "node_modules\@whiskeysockets\baileys" goto run
+if exist "node_modules\@whiskeysockets\baileys" if exist "web\dist\index.html" goto run
 echo.
 echo  First run: downloading what the bot needs. This happens one time only...
 echo.
-call npm install --omit=dev --no-audit --no-fund
+call npm install --no-audit --no-fund
+if errorlevel 1 goto install_failed
+if not exist "web\dist\index.html" call npm run build
 if errorlevel 1 goto install_failed
 
 :run

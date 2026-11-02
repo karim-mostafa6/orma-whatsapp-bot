@@ -1,4 +1,5 @@
-// قلب البوت: بيستقبل كل رسالة، يقرر يرد ولا لأ، ويرد إزاي.
+// استقبال رسايل الواتساب: بيفلتر (جروبات، Status، رسايل قديمة)، ويتعامل مع ردودك إنت،
+// وبيدّي رسايل العملاء للمحرّك (flows/engine.js) اللي بيقرر يرد بإيه.
 import {
   isJidGroup,
   isJidBroadcast,
@@ -8,7 +9,6 @@ import {
   normalizeMessageContent,
   getContentType,
 } from '@whiskeysockets/baileys';
-import { render } from './faq.js';
 import { sendLikeHuman } from './humanize.js';
 
 // أنواع رسايل مالهاش رد (تفاعلات، تعديلات، رسايل نظام ...)
@@ -67,37 +67,25 @@ export function isIgnoredJid(jid) {
   return !jid || Boolean(isJidGroup(jid) || isJidBroadcast(jid) || isJidStatusBroadcast(jid) || isJidNewsletter(jid));
 }
 
-/** اسم العميل ورقمه (من غير لينك) عشان يظهروا في صفحة التحكم */
-function shortLabel(msg) {
+/** رقم العميل لو متاح (أحياناً واتساب بيبعت معرّف @lid بدل الرقم) */
+function phoneOf(msg) {
   const jid = msg.key.remoteJidAlt?.endsWith('@s.whatsapp.net') ? msg.key.remoteJidAlt : msg.key.remoteJid;
-  const phone = jid.endsWith('@s.whatsapp.net') ? `+${jid.split('@')[0].split(':')[0]}` : '';
-  return [msg.pushName, phone].filter(Boolean).join(' ') || jid.split('@')[0];
-}
-
-/** رقم العميل (لو متاح) عشان نبعتهولك في الإشعار */
-function customerLabel(msg) {
-  const jid = msg.key.remoteJidAlt?.endsWith('@s.whatsapp.net') ? msg.key.remoteJidAlt : msg.key.remoteJid;
-  const name = msg.pushName ? `${msg.pushName} ` : '';
-  if (jid.endsWith('@s.whatsapp.net')) {
-    const phone = jid.split('@')[0].split(':')[0];
-    return `${name}(+${phone}) wa.me/${phone}`;
-  }
-  return name.trim() || jid;
+  return jid.endsWith('@s.whatsapp.net') ? jid.split('@')[0].split(':')[0] : '';
 }
 
 /**
  * @param {object} deps
- * @param {() => object} deps.getSock  بيرجّع الـ socket الحالي (بيتغير لو حصل reconnect)
- * @param {{current: object}} deps.faq
- * @param {import('./state.js').ChatState} deps.state
- * @param {(text:string, faq:object)=>Promise<object>} deps.responder
- * @param {object} deps.config
+ * @param {() => object} deps.getSock  الـ socket الحالي (بيتغير لو حصل reconnect)
+ * @param {ReturnType<import('./db.js').createDb>} deps.db
+ * @param {(transport:object)=>ReturnType<import('./flows/engine.js').createEngine>} deps.makeEngine
+ * @param {object} deps.config  إعدادات ثابتة (maxMessageAgeMinutes)
  * @param {object} deps.logger
  */
-export function createHandler({ getSock, faq, state, responder, config, logger, now = () => Date.now(), rand = Math.random }) {
-  const queues = new Map(); // jid → Promise: رسايل نفس المحادثة بتتعالج بالترتيب واحدة ورا التانية
+export function createHandler({ getSock, db, makeEngine, config, logger, now = () => Date.now(), rand = Math.random }) {
+  const queues = new Map(); // jid → Promise: رسايل نفس المحادثة بتتعالج بالترتيب
   const recentReplies = new Map(); // jid → [timestamps] للحد الأقصى في الدقيقة
   const botSent = new Set(); // IDs الرسايل اللي البوت بعتها، عشان ما يفتكرهاش رد منك
+  const behavior = () => db.getSettings().behavior;
 
   const remember = (sent) => {
     if (!sent?.key?.id) return;
@@ -106,43 +94,30 @@ export function createHandler({ getSock, faq, state, responder, config, logger, 
   };
 
   const selfJids = () => {
-    const u = getSock().user || {};
+    const u = getSock()?.user || {};
     return [u.id, u.lid].filter(Boolean).map((j) => jidNormalizedUser(j));
   };
 
-  async function reply(jid, key, text) {
-    const sent = await sendLikeHuman(getSock(), jid, key, text, config, rand);
-    remember(sent);
-    return sent;
-  }
-
-  async function notifyOwner(msg, reason, text) {
-    if (!config.notifyOwner) return;
-    const [me] = selfJids();
-    if (!me) return;
-    const template = faq.current.system.owner_notify || '🔔 {reason}\nالعميل: {customer}\nرسالته: {message}';
-    const body = render(template, { reason, customer: customerLabel(msg), message: text || '(صورة/ريكورد/ملف)' });
-    try {
-      remember(await getSock().sendMessage(me, { text: body }));
-    } catch (err) {
-      logger.warn(`ما قدرتش أبعت إشعار لرقمك: ${err.message}`);
-    }
-  }
+  const engine = makeEngine({
+    async send(jid, text, key) {
+      const sent = await sendLikeHuman(getSock(), jid, key, text, behavior(), rand);
+      remember(sent);
+      return sent;
+    },
+    async notifyOwner(text) {
+      const [me] = selfJids();
+      if (!me) return;
+      remember(await getSock().sendMessage(me, { text }));
+    },
+  });
 
   function overRateLimit(jid) {
     const t = now();
     const list = (recentReplies.get(jid) || []).filter((x) => t - x < 60_000);
     recentReplies.set(jid, list);
-    if (list.length >= config.maxRepliesPerMinute) return true;
+    if (list.length >= behavior().maxRepliesPerMinute) return true;
     list.push(t);
     return false;
-  }
-
-  async function handoff(jid, msg, text, replyText, reason) {
-    await reply(jid, msg.key, replyText);
-    state.pause(jid, reason, config.handoffHours, shortLabel(msg));
-    logger.info(`👤 [${jid}] اتحوّل لموظف (${reason}) — البوت ساكت هنا ${config.handoffHours || '∞'} ساعة أو لحد #bot`);
-    await notifyOwner(msg, reasonLabel(reason), text);
   }
 
   // ---- رسايل إنت بعتها من موبايلك/جهازك ----
@@ -153,67 +128,37 @@ export function createHandler({ getSock, faq, state, responder, config, logger, 
 
     if (cmd === '#bot' || cmd === '#stop') {
       if (cmd === '#bot') {
-        state.resume(jid);
+        engine.resumeContact(jid);
         logger.info(`🤖 [${jid}] البوت رجع يرد (أمر #bot)`);
       } else {
-        state.pause(jid, 'owner_command', null);
+        engine.pauseContact(jid, 'owner_command', null);
         logger.info(`⏸️ [${jid}] البوت اتوقف هنا لحد ما تكتب #bot`);
       }
-      if (config.deleteOwnerCommands) {
-        await getSock().sendMessage(jid, { delete: msg.key }).catch(() => {});
-      }
+      if (behavior().deleteOwnerCommands) await getSock().sendMessage(jid, { delete: msg.key }).catch(() => {});
       return;
     }
 
     // إنت رديت بنفسك → البوت يسكت في المحادثة دي عشان ما يدخلش في كلامك
-    if (config.ownerReplyPauseHours > 0) {
-      const current = state.pausedInfo(jid);
-      if (current?.until === null) return; // متوقف لحد #bot، سيبه كده
-      const wasActive = !state.isPaused(jid);
-      state.pause(jid, 'owner_reply', config.ownerReplyPauseHours);
-      if (wasActive) logger.info(`✋ [${jid}] إنت رديت بنفسك — البوت ساكت هنا ${config.ownerReplyPauseHours} ساعة`);
+    const hours = behavior().ownerReplyPauseHours;
+    if (hours > 0) {
+      const c = db.getContact(jid);
+      if (c?.paused?.until === null) return; // متوقف لحد #bot، سيبه كده
+      const wasActive = !engine.isPaused(jid);
+      engine.pauseContact(jid, 'owner_reply', hours);
+      if (text) db.addMessage(jid, 'owner', text);
+      if (wasActive) logger.info(`✋ [${c?.name || jid}] إنت رديت بنفسك — البوت ساكت هنا ${hours} ساعة`);
     }
   }
 
   // ---- رسايل العملاء ----
   async function handleCustomerMessage(msg, jid) {
-    if (state.globalPaused) return; // البوت متوقف من صفحة التحكم
-    if (state.isPaused(jid)) {
-      logger.debug(`[${jid}] متحوّل لموظف، البوت مش هيرد`);
-      return;
-    }
     const { kind, text } = extractText(msg.message);
     if (kind === 'ignore') return;
-
-    if (overRateLimit(jid)) {
+    if (!db.getSettings().globalPaused && !engine.isPaused(jid) && overRateLimit(jid)) {
       logger.warn(`[${jid}] رسايل كتير في دقيقة، البوت هيستنى شوية`);
       return;
     }
-
-    const f = faq.current;
-    if (kind === 'media') {
-      await handoff(jid, msg, '', render(f.system.media, f.variables, rand), 'media');
-      return;
-    }
-
-    const result = await responder(text, f);
-    logger.info(`💬 [${jid}] "${text.slice(0, 80)}" → ${result.type}${result.intents ? ` (${result.intents.join(', ')})` : ''}`);
-
-    if (result.type === 'answer' && result.handoff) {
-      await handoff(jid, msg, text, result.text, 'needs_human');
-    } else if (result.type === 'answer') {
-      state.clearUnmatched(jid);
-      await reply(jid, msg.key, result.text);
-    } else if (result.type === 'handoff') {
-      await handoff(jid, msg, text, render(f.system.handoff, f.variables, rand), 'customer_request');
-    } else {
-      const n = state.bumpUnmatched(jid);
-      if (config.unmatchedBeforeHandoff > 0 && n >= config.unmatchedBeforeHandoff) {
-        await handoff(jid, msg, text, render(f.system.fallback_handoff, f.variables, rand), 'not_understood');
-      } else {
-        await reply(jid, msg.key, render(f.system.fallback, f.variables, rand));
-      }
-    }
+    await engine.handleInbound({ jid, text, kind, key: msg.key, name: msg.pushName || '', phone: phoneOf(msg) });
   }
 
   async function processMessage(msg, type) {
@@ -235,29 +180,23 @@ export function createHandler({ getSock, faq, state, responder, config, logger, 
     for (const msg of messages) {
       const jid = msg.key?.remoteJid;
       if (!jid) continue;
-      const prev = queues.get(jid) || Promise.resolve();
-      const job = prev
-        .then(() => processMessage(msg, type))
-        .catch((err) => logger.error({ err }, `[${jid}] حصلت مشكلة وأنا بعالج الرسالة`))
-        .finally(() => {
-          if (queues.get(jid) === job) queues.delete(jid);
-        });
-      queues.set(jid, job);
-      jobs.push(job);
+      jobs.push(enqueue(jid, () => processMessage(msg, type)));
     }
     return Promise.all(jobs);
   }
 
-  return { onMessagesUpsert, botSent };
-}
+  /** كل محادثة ليها طابور: الرسايل بتتعالج بالترتيب واحدة ورا التانية */
+  function enqueue(jid, fn) {
+    const prev = queues.get(jid) || Promise.resolve();
+    const job = prev
+      .then(fn)
+      .catch((err) => logger.error({ err }, `[${jid}] حصلت مشكلة وأنا بعالج الرسالة`))
+      .finally(() => {
+        if (queues.get(jid) === job) queues.delete(jid);
+      });
+    queues.set(jid, job);
+    return job;
+  }
 
-function reasonLabel(reason) {
-  return (
-    {
-      customer_request: 'عميل طلب يكلم موظف',
-      not_understood: 'البوت ما فهمش العميل',
-      media: 'عميل بعت صورة/ريكورد/ملف',
-      needs_human: 'عميل سأل عن حاجة محتاجة موظف',
-    }[reason] || reason
-  );
+  return { onMessagesUpsert, engine, botSent, tick: () => engine.tick() };
 }

@@ -1,117 +1,260 @@
-// صفحة التحكم: سيرفر صغير بيشتغل على جهازك بس (http://localhost:3000).
-// مقفول على 127.0.0.1، يعني محدش من برّه جهازك يقدر يفتحه.
+// صفحة التحكم: API + ملفات الواجهة (web/dist).
+// على الكمبيوتر بتشتغل على 127.0.0.1 بس. على السيرفر بتبقى ورا HTTPS وباسورد.
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { prepareFaq, render, unfilledVariables } from '../faq.js';
+import { validateFlow } from '../flows/validate.js';
+import { createDb } from '../db.js';
+import { createEngine } from '../flows/engine.js';
+import { unfilledVariables } from '../faq.js';
 
-const PAGE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'page.html');
-const MAX_BODY = 1024 * 1024;
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+const WEB_DIST = path.join(ROOT, 'web', 'dist');
+const MAX_BODY = 2 * 1024 * 1024;
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.ico': 'image/x-icon',
+  '.woff2': 'font/woff2',
+  '.json': 'application/json',
+};
+
+const httpError = (status, message) => Object.assign(new Error(message), { status });
 
 /**
  * @param {object} deps
  * @param {object} deps.whatsapp  من createWhatsApp (status, logout)
- * @param {{current:object}} deps.faq
- * @param {string} deps.faqFile
- * @param {import('../state.js').ChatState} deps.state
- * @param {Function} deps.responder
+ * @param {ReturnType<import('../db.js').createDb>} deps.db
+ * @param {object} deps.engine
+ * @param {object} deps.auth      من createAuth
+ * @param {string[]} deps.allowedHosts  أسماء الدومين المسموحة (غير localhost)
  * @param {() => object[]} deps.getActivity
  * @param {object} deps.logger
  */
-export function createDashboard({ whatsapp, faq, faqFile, state, responder, getActivity, logger }) {
+export function createDashboard({ whatsapp, db, engine, auth, allowedHosts = [], getActivity, logger }) {
+  const sims = new Map(); // تجارب "جرّب البوت": كل جلسة ليها بيانات في الذاكرة بس
+
+  function contactSummary(c) {
+    const last = c.messages[c.messages.length - 1];
+    return {
+      jid: c.jid,
+      name: c.name,
+      phone: c.phone,
+      tags: c.tags,
+      paused: engine.isPaused(c.jid) ? c.paused : null,
+      lastInboundAt: c.lastInboundAt,
+      lastMessage: last ? { dir: last.dir, text: last.text.slice(0, 120), at: last.at } : null,
+    };
+  }
+
+  /** تجربة: محرّك منفصل ببيانات في الذاكرة، ما بيبعتش حاجة لحد */
+  async function simulate({ session, text, flow, reset }) {
+    const id = String(session || 'default').slice(0, 64);
+    if (reset || !sims.has(id)) {
+      const sdb = createDb(null);
+      sdb.setSettings(JSON.parse(JSON.stringify(db.getSettings())));
+      sdb.setFlows(flow ? [{ ...flow, status: 'active' }] : JSON.parse(JSON.stringify(db.listFlows())));
+      const outbox = [];
+      const silent = { info() {}, warn() {}, error() {}, debug() {} };
+      const sim = {
+        db: sdb,
+        outbox,
+        engine: createEngine({
+          db: sdb,
+          logger: silent,
+          transport: { send: async (_jid, t) => outbox.push({ dir: 'bot', text: t }), notifyOwner: async (t) => outbox.push({ dir: 'owner', text: t }) },
+        }),
+      };
+      sims.set(id, sim);
+      if (sims.size > 50) sims.delete(sims.keys().next().value);
+      if (reset && !text) return { messages: [] };
+    }
+    const sim = sims.get(id);
+    sim.outbox.length = 0;
+    const res = await sim.engine.handleInbound({ jid: 'test@s.whatsapp.net', text: String(text || ''), kind: text ? 'text' : 'media', name: 'تجربة' });
+    const c = sim.db.getContact('test@s.whatsapp.net');
+    return { messages: [...sim.outbox], result: res, paused: Boolean(c?.paused), tags: c?.tags || [] };
+  }
+
   const routes = {
+    'GET /api/me': () => ({ loggedIn: true, authRequired: auth.required }),
+
     'GET /api/status': () => ({
       connection: whatsapp.status.connection,
       qr: whatsapp.status.qr,
       me: whatsapp.status.me,
-      globalPaused: state.globalPaused,
-      missing: unfilledVariables(faq.current),
+      globalPaused: Boolean(db.getSettings().globalPaused),
+      missing: unfilledVariables(db.getSettings()),
+      waiting: db.listContacts().filter((c) => engine.isPaused(c.jid)).length,
+      flows: { total: db.listFlows().length, active: db.listFlows().filter((f) => f.status === 'active').length },
     }),
 
-    'GET /api/faq': () => JSON.parse(fs.readFileSync(faqFile, 'utf8')),
-
-    'PUT /api/faq': (body) => {
-      const prepared = prepareFaq(body); // لو فيه غلطة بيرمي Error برسالة بالعربي
-      const tmp = `${faqFile}.tmp`;
-      fs.writeFileSync(tmp, `${JSON.stringify(body, null, 2)}\n`);
-      fs.renameSync(tmp, faqFile);
-      faq.current = prepared;
-      logger.info('✅ الردود اتحفظت من صفحة التحكم');
-      return { ok: true, missing: unfilledVariables(prepared) };
+    // ---------- Flows ----------
+    'GET /api/flows': () => db.listFlows(),
+    'POST /api/flows/save': ({ flow }) => {
+      if (!flow || typeof flow !== 'object' || !flow.id) throw httpError(400, 'بيانات الـ Flow ناقصة');
+      const clean = {
+        id: String(flow.id).slice(0, 80),
+        name: String(flow.name || '').slice(0, 120),
+        status: ['active', 'paused'].includes(flow.status) ? flow.status : 'paused',
+        priority: Number(flow.priority) || 0,
+        description: String(flow.description || '').slice(0, 500),
+        nodes: Array.isArray(flow.nodes) ? flow.nodes.map(({ id, type, position, data }) => ({ id, type, position, data })) : [],
+        edges: Array.isArray(flow.edges) ? flow.edges.map(({ id, source, sourceHandle, target }) => ({ id, source, sourceHandle: sourceHandle || 'next', target })) : [],
+      };
+      const v = validateFlow(clean);
+      if (clean.status === 'active' && v.errors.length) throw httpError(400, `مينفعش يتشغّل وفيه أخطاء: ${v.errors[0].text}`);
+      const saved = db.saveFlow(clean);
+      logger.info(`💾 الـ Flow «${saved.name}» اتحفظ`);
+      return { ok: true, flow: saved, warnings: v.warnings };
     },
-
-    'GET /api/chats': () => state.listPaused(),
-
-    'POST /api/chats/resume': ({ jid }) => {
-      state.resume(String(jid));
-      logger.info(`🤖 البوت رجع يرد على ${jid} (من صفحة التحكم)`);
+    'POST /api/flows/status': ({ id, status }) => {
+      const f = db.getFlow(String(id));
+      if (!f) throw httpError(404, 'الـ Flow مش موجود');
+      if (status === 'active' && validateFlow(f).errors.length) throw httpError(400, 'صلّح الأخطاء اللي في الـ Flow الأول');
+      db.saveFlow({ ...f, status: status === 'active' ? 'active' : 'paused' });
+      return { ok: true };
+    },
+    'POST /api/flows/delete': ({ id }) => {
+      db.deleteFlow(String(id));
+      logger.info('🗑️ اتمسح Flow');
       return { ok: true };
     },
 
-    'POST /api/bot': ({ paused }) => {
-      state.setGlobalPaused(paused);
-      logger.info(paused ? '⏸️ البوت اتوقف لكل العملاء (من صفحة التحكم)' : '▶️ البوت رجع يشتغل (من صفحة التحكم)');
-      return { ok: true, globalPaused: state.globalPaused };
+    // ---------- العملاء والمحادثات ----------
+    'GET /api/contacts': () =>
+      db
+        .listContacts()
+        .map(contactSummary)
+        .sort((a, b) => Boolean(b.paused) - Boolean(a.paused) || (b.lastInboundAt || 0) - (a.lastInboundAt || 0))
+        .slice(0, 300),
+    'GET /api/contact': (_b, url) => {
+      const c = db.getContact(url.searchParams.get('jid') || '');
+      if (!c) throw httpError(404, 'العميل مش موجود');
+      return { ...contactSummary(c), messages: c.messages, vars: c.vars };
+    },
+    'POST /api/contacts/resume': ({ jid }) => {
+      engine.resumeContact(String(jid));
+      logger.info(`🤖 البوت رجع يرد على ${db.getContact(String(jid))?.name || jid} (من صفحة التحكم)`);
+      return { ok: true };
+    },
+    'POST /api/contacts/pause': ({ jid }) => {
+      engine.pauseContact(String(jid), 'dashboard', null);
+      return { ok: true };
     },
 
-    'POST /api/test': async ({ text, faq: draft }) => {
-      // بنجرّب على النسخة اللي في الصفحة (حتى لو لسه ما اتحفظتش)
-      const f = draft ? prepareFaq(draft) : faq.current;
-      const r = await responder(String(text || ''), f);
-      if (r.type === 'answer') return { type: r.handoff ? 'answer_handoff' : 'answer', text: r.text, intents: r.intents };
-      if (r.type === 'handoff') return { type: 'handoff', text: render(f.system.handoff, f.variables) };
-      return { type: 'none', text: render(f.system.fallback, f.variables) };
+    // ---------- الإعدادات ----------
+    'GET /api/settings': () => db.getSettings(),
+    'PUT /api/settings': (body) => {
+      const cur = db.getSettings();
+      const b = body.behavior || {};
+      const num = (v, d, min, max) => (Number.isFinite(Number(v)) ? Math.min(max, Math.max(min, Number(v))) : d);
+      const next = {
+        ...cur,
+        variables: Object.fromEntries(Object.entries(body.variables || cur.variables).map(([k, v]) => [String(k).slice(0, 60), String(v).slice(0, 500)])),
+        texts: { ...cur.texts, ...Object.fromEntries(Object.entries(body.texts || {}).map(([k, v]) => [k, String(v).slice(0, 2000)])) },
+        behavior: {
+          ...cur.behavior,
+          minDelayMs: num(b.minDelayMs, cur.behavior.minDelayMs, 0, 30000),
+          maxDelayMs: num(b.maxDelayMs, cur.behavior.maxDelayMs, 0, 60000),
+          handoffHours: num(b.handoffHours, cur.behavior.handoffHours, 0, 720),
+          ownerReplyPauseHours: num(b.ownerReplyPauseHours, cur.behavior.ownerReplyPauseHours, 0, 720),
+          maxRepliesPerMinute: num(b.maxRepliesPerMinute, cur.behavior.maxRepliesPerMinute, 1, 30),
+          notifyOwner: b.notifyOwner ?? cur.behavior.notifyOwner,
+          markAsRead: b.markAsRead ?? cur.behavior.markAsRead,
+          deleteOwnerCommands: b.deleteOwnerCommands ?? cur.behavior.deleteOwnerCommands,
+        },
+      };
+      if (next.behavior.maxDelayMs < next.behavior.minDelayMs) next.behavior.maxDelayMs = next.behavior.minDelayMs;
+      db.setSettings(next);
+      logger.info('✅ الإعدادات اتحفظت');
+      return { ok: true, settings: next };
     },
+    'POST /api/bot': ({ paused }) => {
+      db.setSettings({ ...db.getSettings(), globalPaused: Boolean(paused) });
+      logger.info(paused ? '⏸️ البوت اتوقف لكل العملاء (من صفحة التحكم)' : '▶️ البوت رجع يشتغل (من صفحة التحكم)');
+      return { ok: true };
+    },
+
+    // ---------- تجربة ----------
+    'POST /api/simulate': (body) => simulate(body),
 
     'GET /api/activity': () => getActivity(),
 
-    'POST /api/logout': async () => {
+    'POST /api/whatsapp/logout': async () => {
       logger.warn('🚪 فك ربط الرقم (من صفحة التحكم)');
       await whatsapp.logout();
       return { ok: true };
     },
   };
 
+  function hostAllowed(host) {
+    const name = String(host || '').replace(/:\d+$/, '').toLowerCase();
+    return name === 'localhost' || name === '127.0.0.1' || allowedHosts.includes(name);
+  }
+
+  function serveStatic(url, res) {
+    let rel = decodeURIComponent(url.pathname);
+    if (rel === '/' || !path.extname(rel)) rel = '/index.html'; // صفحات الواجهة كلها index.html
+    const file = path.normalize(path.join(WEB_DIST, rel));
+    if (!file.startsWith(WEB_DIST)) return res.writeHead(403).end();
+    fs.readFile(file, (err, buf) => {
+      if (err) {
+        if (rel === '/index.html') {
+          res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+          return res.end('الواجهة مش متبنية. شغّل: npm run build');
+        }
+        return res.writeHead(404).end('Not found');
+      }
+      const immutable = rel.startsWith('/assets/');
+      res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Cache-Control': immutable ? 'public, max-age=31536000, immutable' : 'no-store' });
+      res.end(buf);
+    });
+  }
+
   return http.createServer(async (req, res) => {
-    // حماية: نقبل بس طلبات جاية لـ localhost (ضد هجمات DNS rebinding)
-    if (!/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(req.headers.host || '')) {
-      res.writeHead(403).end('Forbidden');
-      return;
-    }
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    // حماية: نقبل بس الدومين بتاعنا (ضد هجمات DNS rebinding)
+    if (!hostAllowed(req.headers.host)) return res.writeHead(403).end('Forbidden');
 
     const url = new URL(req.url, 'http://localhost');
-    if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-      fs.createReadStream(PAGE).pipe(res);
-      return;
-    }
+    if (!url.pathname.startsWith('/api/')) return req.method === 'GET' ? serveStatic(url, res) : res.writeHead(405).end();
 
-    const handler = routes[`${req.method} ${url.pathname}`];
-    if (!handler) {
-      res.writeHead(404).end('Not found');
-      return;
-    }
+    const send = (status, data, headers = {}) => {
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
+      res.end(JSON.stringify(data));
+    };
 
     try {
       let body = {};
       if (req.method !== 'GET') {
-        // لازم JSON: ده بيمنع أي موقع تاني مفتوح في المتصفح إنه يبعت أوامر للبوت
+        // لازم JSON: ده بيمنع أي موقع تاني مفتوح في المتصفح إنه يبعت أوامر
         if (!String(req.headers['content-type']).startsWith('application/json')) throw httpError(415, 'لازم JSON');
         body = await readJson(req);
       }
-      const result = await handler(body);
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-      res.end(JSON.stringify(result));
+
+      if (url.pathname === '/api/login' && req.method === 'POST') {
+        const cookie = auth.login(req, body.password);
+        if (!cookie) throw httpError(401, 'الباسورد غلط');
+        logger.info('🔑 حد دخل صفحة التحكم');
+        return send(200, { ok: true }, { 'Set-Cookie': cookie });
+      }
+      if (url.pathname === '/api/logout-session' && req.method === 'POST') return send(200, { ok: true }, { 'Set-Cookie': auth.logoutCookie() });
+      if (!auth.isLoggedIn(req)) throw httpError(401, 'سجّل دخول الأول');
+
+      const handler = routes[`${req.method} ${url.pathname}`];
+      if (!handler) throw httpError(404, 'Not found');
+      send(200, await handler(body, url));
     } catch (err) {
-      res.writeHead(err.status || 400, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ error: err.message }));
+      send(err.status || 400, { error: err.message });
     }
   });
-}
-
-function httpError(status, message) {
-  return Object.assign(new Error(message), { status });
 }
 
 function readJson(req) {
@@ -136,8 +279,8 @@ function readJson(req) {
   });
 }
 
-/** يشغّل الصفحة على أول بورت فاضي من 3000 لـ 3010 */
-export function listen(server, startPort, logger) {
+/** يشغّل الصفحة على أول بورت فاضي (من البورت المطلوب لحد +10) */
+export function listen(server, startPort, host, logger) {
   return new Promise((resolve, reject) => {
     let port = startPort;
     const tryPort = () => {
@@ -147,8 +290,8 @@ export function listen(server, startPort, logger) {
           tryPort();
         } else reject(err);
       });
-      server.listen(port, '127.0.0.1', () => {
-        logger.info(`🌐 صفحة التحكم شغالة: http://localhost:${port}`);
+      server.listen(port, host, () => {
+        logger.info(`🌐 صفحة التحكم شغالة على ${host}:${port}`);
         resolve(port);
       });
     };
