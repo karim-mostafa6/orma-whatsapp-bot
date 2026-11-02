@@ -67,6 +67,13 @@ export function isIgnoredJid(jid) {
   return !jid || Boolean(isJidGroup(jid) || isJidBroadcast(jid) || isJidStatusBroadcast(jid) || isJidNewsletter(jid));
 }
 
+/** اسم العميل ورقمه (من غير لينك) عشان يظهروا في صفحة التحكم */
+function shortLabel(msg) {
+  const jid = msg.key.remoteJidAlt?.endsWith('@s.whatsapp.net') ? msg.key.remoteJidAlt : msg.key.remoteJid;
+  const phone = jid.endsWith('@s.whatsapp.net') ? `+${jid.split('@')[0].split(':')[0]}` : '';
+  return [msg.pushName, phone].filter(Boolean).join(' ') || jid.split('@')[0];
+}
+
 /** رقم العميل (لو متاح) عشان نبعتهولك في الإشعار */
 function customerLabel(msg) {
   const jid = msg.key.remoteJidAlt?.endsWith('@s.whatsapp.net') ? msg.key.remoteJidAlt : msg.key.remoteJid;
@@ -133,7 +140,7 @@ export function createHandler({ getSock, faq, state, responder, config, logger, 
 
   async function handoff(jid, msg, text, replyText, reason) {
     await reply(jid, msg.key, replyText);
-    state.pause(jid, reason, config.handoffHours);
+    state.pause(jid, reason, config.handoffHours, shortLabel(msg));
     logger.info(`👤 [${jid}] اتحوّل لموظف (${reason}) — البوت ساكت هنا ${config.handoffHours || '∞'} ساعة أو لحد #bot`);
     await notifyOwner(msg, reasonLabel(reason), text);
   }
@@ -170,6 +177,7 @@ export function createHandler({ getSock, faq, state, responder, config, logger, 
 
   // ---- رسايل العملاء ----
   async function handleCustomerMessage(msg, jid) {
+    if (state.globalPaused) return; // البوت متوقف من صفحة التحكم
     if (state.isPaused(jid)) {
       logger.debug(`[${jid}] متحوّل لموظف، البوت مش هيرد`);
       return;
