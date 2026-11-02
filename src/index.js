@@ -26,7 +26,7 @@ const logger = createLogger(config.logLevel, (entry) => {
 let kv = null;
 let kvData = new Map();
 if (config.supabaseUrl) {
-  kv = createSupabaseKv({ url: config.supabaseUrl, key: config.supabaseKey, logger });
+  kv = createSupabaseKv({ url: config.supabaseUrl, key: config.supabaseKey, token: config.supabaseToken, logger });
   try {
     await kv.check();
     kvData = await kv.loadAll('data:');

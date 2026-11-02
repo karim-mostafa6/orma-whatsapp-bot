@@ -1,6 +1,7 @@
 // كل الإعدادات بتتقري من ملف .env (انسخ .env.example لـ .env وعدّل فيه).
 import 'dotenv/config';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -49,7 +50,12 @@ export function loadConfig() {
     trustProxy: bool('TRUST_PROXY', onRender), // ورا Caddy/Render: الـ IP الحقيقي في X-Forwarded-For
     // Supabase: تخزين الجلسة والبيانات (للاستضافات اللي بتمسح الملفات زي Render المجاني)
     supabaseUrl: (process.env.SUPABASE_URL || '').trim(),
-    supabaseKey: (process.env.SUPABASE_SERVICE_KEY || '').trim(),
+    // طريقتين:
+    //  1) SUPABASE_SERVICE_KEY (المفتاح السري): البوت بيكلّم الجدول مباشرة.
+    //  2) SUPABASE_KEY (المفتاح العام publishable): البوت بيكلّم دوال orma_kv_* المحمية بباسورد،
+    //     والباسورد ده مشتق من SESSION_SECRET اللي Render بيولّده ومحدش بيشوفه، وبيتسجّل أول تشغيل.
+    supabaseKey: (process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_KEY || '').trim(),
+    supabaseToken: '',
     // Render المجاني بينام بعد 15 دقيقة من غير زيارات: البوت بيزور نفسه كل شوية
     keepAliveUrl: process.env.KEEP_ALIVE_URL || (process.env.RENDER_EXTERNAL_URL ? `${process.env.RENDER_EXTERNAL_URL.replace(/\/$/, '')}/api/health` : ''),
     keepAliveMinutes: num('KEEP_ALIVE_MINUTES', 10),
@@ -59,14 +65,19 @@ export function loadConfig() {
     logLevel: process.env.LOG_LEVEL || 'info',
   };
 
+  if (!process.env.SUPABASE_SERVICE_KEY && process.env.SUPABASE_KEY) {
+    const base = (process.env.SUPABASE_BOT_TOKEN || cfg.sessionSecret || '').trim();
+    if (base.length < 16) throw new Error('مع SUPABASE_KEY لازم SESSION_SECRET (أو SUPABASE_BOT_TOKEN) — 16 حرف على الأقل');
+    cfg.supabaseToken = process.env.SUPABASE_BOT_TOKEN ? base : crypto.createHash('sha256').update(`orma-kv:${base}`).digest('hex');
+  }
   if (cfg.maxDelayMs < cfg.minDelayMs) throw new Error('MAX_DELAY_MS لازم يكون أكبر من أو يساوي MIN_DELAY_MS');
   const loopback = ['127.0.0.1', 'localhost', '::1'].includes(cfg.bindHost);
   if ((!loopback || cfg.publicHost) && cfg.adminPassword.length < 8) {
     throw new Error('صفحة التحكم مفتوحة للنت: لازم ADMIN_PASSWORD في .env (8 حروف على الأقل)');
   }
   if (onRender && !(cfg.supabaseUrl && cfg.supabaseKey)) {
-    throw new Error('على Render لازم SUPABASE_URL و SUPABASE_SERVICE_KEY، وإلا جلسة الواتساب هتضيع مع كل restart');
+    throw new Error('على Render لازم SUPABASE_URL و SUPABASE_KEY، وإلا جلسة الواتساب هتضيع مع كل restart');
   }
-  if (Boolean(cfg.supabaseUrl) !== Boolean(cfg.supabaseKey)) throw new Error('محتاج SUPABASE_URL و SUPABASE_SERVICE_KEY الاتنين مع بعض');
+  if (Boolean(cfg.supabaseUrl) !== Boolean(cfg.supabaseKey)) throw new Error('محتاج SUPABASE_URL و SUPABASE_KEY الاتنين مع بعض');
   return cfg;
 }

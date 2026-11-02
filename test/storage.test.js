@@ -48,7 +48,7 @@ test('kv: المفتاح الجديد (sb_secret) بيتبعت في apikey بس�
 
 test('kv: مفتاح غلط → رسالة واضحة', async () => {
   const bad = createSupabaseKv({ url: sb.url, key: 'wrong', logger: silent });
-  await assert.rejects(bad.check(), /service_role/);
+  await assert.rejects(bad.check(), /مفتاح Supabase غلط/);
 });
 
 test('kv: لو الحفظ فشل، التعديل ما بيضيعش وبيتحفظ في المحاولة الجاية', async () => {
@@ -114,4 +114,27 @@ test('BufferJSON: نفس الصيغة اللي Baileys بيستخدمها', () =
   const creds = initAuthCreds();
   const back = JSON.parse(JSON.stringify(creds, BufferJSON.replacer), BufferJSON.reviver);
   assert.deepEqual(Buffer.from(back.signedIdentityKey.private), Buffer.from(creds.signedIdentityKey.private));
+});
+
+test('وضع الباسورد (المفتاح العام): أول تشغيل بيسجّل الباسورد، وبعده أي باسورد تاني بيترفض', async () => {
+  const s3 = await startFakeSupabase({ key: 'sb_publishable_x', pageLimit: 3 });
+  const token = 'a'.repeat(64);
+  const kv = createSupabaseKv({ url: s3.url, key: 'sb_publishable_x', token, flushMs: 10, logger: silent });
+  await kv.check(); // claim
+  assert.ok(s3.tokenHash);
+  for (let i = 0; i < 8; i++) kv.set(`data:${i}`, String(i));
+  kv.set('auth:creds', '{}');
+  await kv.flushNow();
+  const all = await kv.loadAll('data:'); // صفحات من 3
+  assert.equal(all.size, 8);
+  kv.del('data:0');
+  await kv.flushNow();
+  assert.equal((await kv.loadAll('data:')).size, 7);
+  // restart بنفس الباسورد: شغال
+  await createSupabaseKv({ url: s3.url, key: 'sb_publishable_x', token, logger: silent }).check();
+  // باسورد تاني (حد تاني بيحاول): مرفوض
+  const intruder = createSupabaseKv({ url: s3.url, key: 'sb_publishable_x', token: 'b'.repeat(64), logger: silent });
+  await assert.rejects(intruder.check(), /مش مطابق/);
+  await assert.rejects(intruder.loadAll('data:'), /مش مطابق/);
+  await s3.close();
 });

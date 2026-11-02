@@ -21,26 +21,12 @@
    - **Database Password:** اكتب أي باسورد واحفظه.
    - **Region:** اختار الأقرب ليك، زي **Central EU (Frankfurt)**.
    - دوس **Create new project**، واستنى دقيقتين.
-3. من القايمة اللي على الشمال افتح **SQL Editor**، ودوس **New query**، والزق ده كله، ودوس **Run**. المفروض يظهرلك **Success**:
-   ```sql
-   -- بوت ORMA: جدول واحد بيتحفظ فيه كل حاجة (جلسة الواتساب، الـ Flows، المحادثات، الإعدادات).
-   -- انسخ الكود ده كله، والزقه في Supabase ← SQL Editor ← New query، ودوس Run.
-   create table if not exists public.orma_kv (
-     key text primary key,
-     value text not null,
-     updated_at timestamptz not null default now()
-   );
-   
-   -- حماية: محدش يقدر يقرا الجدول ده غير البوت (بمفتاح service_role).
-   -- من غير الخطوة دي، أي حد معاه الـ anon key كان هيقدر يشوف جلسة الواتساب.
-   alter table public.orma_kv enable row level security;
-   revoke all on public.orma_kv from anon, authenticated;
-   ```
+3. من القايمة اللي على الشمال افتح **SQL Editor**، ودوس **New query**. افتح ملف **[supabase/setup.sql](supabase/setup.sql)**، وانسخ اللي فيه كله والزقه، ودوس **Run**. المفروض يظهرلك **Success**.
 4. افتح **Project Settings** (⚙️ تحت على الشمال)، وبعدين **API Keys**، وانسخ حاجتين في ملف عندك:
    - **Project URL:** شكله `https://xxxx.supabase.co`. ممكن تلاقيه في **Data API**، أو في الصفحة الرئيسية للمشروع.
-   - **المفتاح السري:** يا إما **Secret key** (بيبدأ بـ `sb_secret_`)، يا إما **service_role** من تاب **Legacy API Keys** (بيبدأ بـ `eyJ`). الاتنين شغالين.
+   - **Publishable key:** بيبدأ بـ `sb_publishable_`.
 
-   > 🔒 المفتاح السري ده زي باسورد. ما تبعتهوش لحد ولا تحطه في أي مكان غير Render.
+   > 🔒 **ليه المفتاح العام كفاية؟** الجدول مقفول قدام المفتاح ده. البوت بيفتحه بباسورد بيتولّد لوحده جوه Render (`SESSION_SECRET`) ومحدش بيشوفه، وبيتسجّل في Supabase أول مرة البوت يشتغل.
 
 ### 2️⃣ Render: تشغيل البوت (حوالي 10 دقايق)
 1. ادخل على **[render.com](https://render.com)** ودوس **Get Started**، وسجّل بحساب **GitHub** بتاعك.
@@ -51,7 +37,7 @@
 3. Render هيقرا الإعدادات لوحده، وهيطلب منك 3 حاجات:
    - **ADMIN_PASSWORD:** باسورد صفحة التحكم. حروف إنجليزي وأرقام، 8 على الأقل.
    - **SUPABASE_URL:** الـ Project URL اللي نسخته.
-   - **SUPABASE_SERVICE_KEY:** المفتاح السري اللي نسخته.
+   - **SUPABASE_KEY:** الـ Publishable key اللي نسخته.
 4. دوس **Apply** أو **Deploy Blueprint**، واستنى حوالي 5 دقايق لحد ما الحالة تبقى **Live** ✅.
 5. افتح الخدمة **orma-whatsapp-bot**، هتلاقي اللينك بتاعها فوق، وشكله كده: `https://orma-whatsapp-bot.onrender.com`.
 
@@ -301,7 +287,7 @@ npm test       # الاختبارات
 | `runs.json` | الـ Flows المستنية رد العميل أو خلصان تأخير. بتكمّل حتى بعد restart |
 | `faq.json` | الردود القديمة. بتتحوّل لـ Flows أول تشغيل بس |
 
-**على Render:** الملفات دي كلها، ومعاها جلسة الواتساب، بتتحفظ في جدول `orma_kv` في Supabase (`supabase/setup.sql`)، لأن Render المجاني بيمسح الملفات مع كل restart. وده بيشتغل بس لو `SUPABASE_URL` و `SUPABASE_SERVICE_KEY` موجودين.
+**على Render:** الملفات دي كلها، ومعاها جلسة الواتساب، بتتحفظ في جدول `orma_kv` في Supabase (`supabase/setup.sql`)، لأن Render المجاني بيمسح الملفات مع كل restart. وده بيشتغل بس لو `SUPABASE_URL` و `SUPABASE_KEY` موجودين. البوت بيوصل للجدول عن طريق دوال `orma_kv_*` بس، والدوال دي بتطلب باسورد مشتق من `SESSION_SECRET`، وبيتسجّل كبصمة sha256 أول تشغيل. ولو حطيت `SUPABASE_SERVICE_KEY` بداله، البوت هيكلّم الجدول مباشرة.
 
 وفولدر `auth/` فيه جلسة الواتساب. **فيه مفاتيح الدخول على الرقم**، فما ترفعهوش في أي مكان (موجود في `.gitignore`).
 
