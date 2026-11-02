@@ -6,11 +6,25 @@ import path from 'node:path';
 const MAX_MESSAGES_PER_CONTACT = 60;
 
 class JsonFile {
-  constructor(file, fallback) {
+  /**
+   * @param {string|null} file  مسار الملف (تخزين على الجهاز)، أو null
+   * @param {*} fallback
+   * @param {{kv: object, key: string, initial: string|undefined}|null} remote  تخزين في Supabase بدل الملف
+   */
+  constructor(file, fallback, remote = null) {
     this.file = file;
+    this.remote = remote;
     this.timer = null;
     this.data = fallback;
-    if (file && fs.existsSync(file)) {
+    if (remote) {
+      if (remote.initial !== undefined) {
+        try {
+          this.data = JSON.parse(remote.initial);
+        } catch {
+          /* قيمة بايظة: نبدأ من جديد */
+        }
+      }
+    } else if (file && fs.existsSync(file)) {
       try {
         this.data = JSON.parse(fs.readFileSync(file, 'utf8'));
       } catch {
@@ -20,13 +34,18 @@ class JsonFile {
     }
   }
   save() {
-    if (!this.file) return;
+    if (!this.file && !this.remote) return;
     clearTimeout(this.timer);
-    this.timer = setTimeout(() => this.flush(), 250);
+    // Supabase: نستنى شوية أكتر عشان نجمّع التعديلات ونقلل الطلبات
+    this.timer = setTimeout(() => this.flush(), this.remote ? 3000 : 250);
   }
   flush() {
-    if (!this.file) return;
     clearTimeout(this.timer);
+    if (this.remote) {
+      this.remote.kv.set(this.remote.key, JSON.stringify(this.data));
+      return;
+    }
+    if (!this.file) return;
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
     const tmp = `${this.file}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(this.data, null, 2));
@@ -36,13 +55,17 @@ class JsonFile {
 
 /**
  * @param {string|null} dir فولدر البيانات، أو null للاختبارات (كله في الذاكرة)
+ * @param {object} [opts]
+ * @param {object} [opts.kv]        لو موجود: البيانات بتتحفظ في Supabase بدل الملفات
+ * @param {Map<string,string>} [opts.kvData] البيانات اللي اتحمّلت من Supabase (data:*)
  */
-export function createDb(dir, { now = () => Date.now() } = {}) {
-  const f = (name) => (dir ? path.join(dir, name) : null);
-  const settings = new JsonFile(f('settings.json'), null);
-  const flows = new JsonFile(f('flows.json'), null);
-  const contacts = new JsonFile(f('contacts.json'), {});
-  const runs = new JsonFile(f('runs.json'), []);
+export function createDb(dir, { now = () => Date.now(), kv = null, kvData = new Map() } = {}) {
+  const f = (name) => (dir && !kv ? path.join(dir, name) : null);
+  const remote = (name) => (kv ? { kv, key: `data:${name}`, initial: kvData.get(`data:${name}`) } : null);
+  const settings = new JsonFile(f('settings.json'), null, remote('settings'));
+  const flows = new JsonFile(f('flows.json'), null, remote('flows'));
+  const contacts = new JsonFile(f('contacts.json'), {}, remote('contacts'));
+  const runs = new JsonFile(f('runs.json'), [], remote('runs'));
 
   const db = {
     now,
@@ -131,8 +154,10 @@ export function createDb(dir, { now = () => Date.now() } = {}) {
       runs.save();
     },
 
-    flush() {
+    /** يكتب كل حاجة دلوقتي (ولو Supabase: يستنى لحد ما تتحفظ) */
+    async flush() {
       for (const x of [settings, flows, contacts, runs]) if (x.data !== null) x.flush();
+      if (kv) await kv.flushNow();
     },
   };
   return db;

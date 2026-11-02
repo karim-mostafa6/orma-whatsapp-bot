@@ -1,0 +1,22 @@
+# إعداد Render: البوت بيتسطّب لوحده لما تدوس "Deploy to Render" في الـ README.
+# الخطة المجانية (من غير فيزا). جلسة الواتساب والبيانات بتتحفظ في Supabase.
+services:
+  - type: web
+    name: orma-whatsapp-bot
+    runtime: node
+    plan: free
+    buildCommand: npm ci --include=dev --no-audit --no-fund && npm run build
+    startCommand: node src/index.js
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true

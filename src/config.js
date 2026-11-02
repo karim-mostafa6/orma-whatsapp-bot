@@ -20,6 +20,8 @@ const bool = (name, def) => {
 const file = (name, def) => path.resolve(ROOT, process.env[name] || def);
 
 export function loadConfig() {
+  // Render بيحط المتغيرات دي لوحده: RENDER=true, RENDER_EXTERNAL_HOSTNAME, RENDER_EXTERNAL_URL, PORT
+  const onRender = Boolean(process.env.RENDER);
   const cfg = {
     authDir: file('AUTH_DIR', 'auth'),
     dataDir: file('DATA_DIR', 'data'),
@@ -37,13 +39,20 @@ export function loadConfig() {
     deleteOwnerCommands: bool('DELETE_OWNER_COMMANDS', true),
 
 
-    dashboardPort: num('DASHBOARD_PORT', 3000),
-    openBrowser: bool('OPEN_BROWSER', true),
+    dashboardPort: num('DASHBOARD_PORT', num('PORT', 3000)),
+    openBrowser: bool('OPEN_BROWSER', !onRender),
     // على السيرفر: BIND_HOST=0.0.0.0 أو ورا Caddy على 127.0.0.1، و PUBLIC_HOST = الدومين
-    bindHost: process.env.BIND_HOST || '127.0.0.1',
-    publicHost: (process.env.PUBLIC_HOST || '').trim().toLowerCase(),
+    bindHost: process.env.BIND_HOST || (onRender ? '0.0.0.0' : '127.0.0.1'),
+    publicHost: (process.env.PUBLIC_HOST || process.env.RENDER_EXTERNAL_HOSTNAME || '').trim().toLowerCase(),
     adminPassword: process.env.ADMIN_PASSWORD || '',
-    trustProxy: bool('TRUST_PROXY', false), // ورا Caddy: الـ IP الحقيقي في X-Forwarded-For
+    sessionSecret: process.env.SESSION_SECRET || '',
+    trustProxy: bool('TRUST_PROXY', onRender), // ورا Caddy/Render: الـ IP الحقيقي في X-Forwarded-For
+    // Supabase: تخزين الجلسة والبيانات (للاستضافات اللي بتمسح الملفات زي Render المجاني)
+    supabaseUrl: (process.env.SUPABASE_URL || '').trim(),
+    supabaseKey: (process.env.SUPABASE_SERVICE_KEY || '').trim(),
+    // Render المجاني بينام بعد 15 دقيقة من غير زيارات: البوت بيزور نفسه كل شوية
+    keepAliveUrl: process.env.KEEP_ALIVE_URL || (process.env.RENDER_EXTERNAL_URL ? `${process.env.RENDER_EXTERNAL_URL.replace(/\/$/, '')}/api/health` : ''),
+    keepAliveMinutes: num('KEEP_ALIVE_MINUTES', 10),
     selfUpdate: bool('SELF_UPDATE', false), // زرار «تحديث البوت» (على السيرفر بس)
     updateBranch: process.env.UPDATE_BRANCH || 'main',
 
@@ -55,5 +64,9 @@ export function loadConfig() {
   if ((!loopback || cfg.publicHost) && cfg.adminPassword.length < 8) {
     throw new Error('صفحة التحكم مفتوحة للنت: لازم ADMIN_PASSWORD في .env (8 حروف على الأقل)');
   }
+  if (onRender && !(cfg.supabaseUrl && cfg.supabaseKey)) {
+    throw new Error('على Render لازم SUPABASE_URL و SUPABASE_SERVICE_KEY، وإلا جلسة الواتساب هتضيع مع كل restart');
+  }
+  if (Boolean(cfg.supabaseUrl) !== Boolean(cfg.supabaseKey)) throw new Error('محتاج SUPABASE_URL و SUPABASE_SERVICE_KEY الاتنين مع بعض');
   return cfg;
 }
