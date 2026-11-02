@@ -218,3 +218,19 @@ test('hybrid: لو الكلمات ما لقتش، يسأل الـ LLM؛ ولو �
   await t.incoming('crash');
   assert.deepEqual(t.toCustomer(), ['SHIPPING', 'LLM', 'FALLBACK']);
 });
+
+test('زرار إيقاف البوت من الصفحة: البوت ما يردش على حد', async () => {
+  const t = setup();
+  t.state.setGlobalPaused(true);
+  await t.incoming('شحن');
+  assert.deepEqual(t.toCustomer(), []);
+  t.state.setGlobalPaused(false);
+  await t.incoming('شحن');
+  assert.deepEqual(t.toCustomer(), ['SHIPPING']);
+});
+
+test('اسم العميل ورقمه بيتحفظوا مع التحويل (عشان يظهروا في الصفحة)', async () => {
+  const t = setup();
+  await t.incoming('موظف');
+  assert.equal(t.state.pausedInfo(CUSTOMER).label, 'Sara +201000000001');
+});

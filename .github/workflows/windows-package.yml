@@ -1,0 +1,103 @@
+# يبني نسخة ويندوز جاهزة (فيها Node.js وكل المكتبات) عشان صاحب المتجر
+# ينزّل ملف واحد ويعمل دبل كليك من غير ما يثبّت أي حاجة.
+#  - في الـ Pull Request: بيبني ويجرّب بس (من غير نشر).
+#  - بعد الدمج في main: بينشر الملف على صفحة Releases بلينك ثابت:
+#    https://github.com/<owner>/<repo>/releases/latest/download/ORMA-Bot-Windows.zip
+name: Windows package
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install and test
+        run: |
+          npm ci --no-audit --no-fund
+          npm test
+
+      - name: Build the package folder
+        shell: pwsh
+        run: |
+          $out = "ORMA-Bot"
+          New-Item -ItemType Directory $out | Out-Null
+          Copy-Item -Recurse -Path src, data, scripts -Destination $out
+          Copy-Item -Path package.json, package-lock.json, START-BOT.bat, START-WITH-WINDOWS.bat, README.md, .env.example -Destination $out
+          Push-Location $out
+          npm ci --omit=dev --no-audit --no-fund
+          Pop-Location
+          New-Item -ItemType Directory "$out/node" | Out-Null
+          Copy-Item (Get-Command node).Source "$out/node/node.exe"
+          & "$out/node/node.exe" -v
+
+      - name: Smoke test (start the bot, open the control page, wait for a QR)
+        shell: pwsh
+        run: |
+          $tmp = Join-Path $env:RUNNER_TEMP "smoke"
+          New-Item -ItemType Directory $tmp | Out-Null
+          $env:OPEN_BROWSER = "false"
+          $env:AUTH_DIR = Join-Path $tmp "auth"
+          $env:STATE_FILE = Join-Path $tmp "state.json"
+          $p = Start-Process -FilePath "ORMA-Bot/node/node.exe" -ArgumentList "src/index.js" -WorkingDirectory "ORMA-Bot" -PassThru `
+                 -RedirectStandardOutput (Join-Path $tmp "out.log") -RedirectStandardError (Join-Path $tmp "err.log")
+          $page = $false; $qr = $false
+          for ($i = 0; $i -lt 45; $i++) {
+            Start-Sleep -Seconds 2
+            try {
+              $s = Invoke-RestMethod -Uri "http://localhost:3000/api/status" -TimeoutSec 5
+              $page = $true
+              Write-Host "connection: $($s.connection)"
+              if ($s.connection -eq "qr" -and $s.qr) { $qr = $true; break }
+            } catch { Write-Host "page not up yet..." }
+          }
+          $html = (Invoke-WebRequest -Uri "http://localhost:3000/" -UseBasicParsing).Content
+          Stop-Process -Id $p.Id -Force
+          Write-Host "----- bot output -----"
+          Get-Content (Join-Path $tmp "out.log") -Encoding UTF8 -ErrorAction SilentlyContinue
+          Get-Content (Join-Path $tmp "err.log") -Encoding UTF8 -ErrorAction SilentlyContinue
+          if (-not $page -or $html -notmatch "ORMA") { throw "The control page did not start" }
+          if ($qr) { Write-Host "OK: WhatsApp sent a QR code - the connection works on Windows" }
+          else { Write-Host "::warning::The page works, but no WhatsApp QR arrived within 90s on the CI machine" }
+
+      - name: Zip
+        shell: pwsh
+        run: |
+          # نتأكد إن مفيش جلسة أو حالة اتعملت بالغلط جوه الباكدج
+          Remove-Item -Recurse -Force ORMA-Bot/auth, ORMA-Bot/data/state.json -ErrorAction SilentlyContinue
+          Compress-Archive -Path ORMA-Bot -DestinationPath ORMA-Bot-Windows.zip
+          "{0:N1} MB" -f ((Get-Item ORMA-Bot-Windows.zip).Length / 1MB)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ORMA-Bot-Windows
+          path: ORMA-Bot-Windows.zip
+
+      - name: Publish the download link
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete windows --yes --cleanup-tag || true
+          gh release create windows ORMA-Bot-Windows.zip \
+            --target "$GITHUB_SHA" \
+            --title "بوت ORMA — نسخة ويندوز جاهزة" \
+            --notes "نزّل ORMA-Bot-Windows.zip، اعمل كليك يمين ← Extract All، وبعدين دبل كليك على START-BOT. مش محتاج تثبّت أي حاجة." \
+            --latest

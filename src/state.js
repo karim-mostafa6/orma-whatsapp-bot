@@ -8,12 +8,15 @@ export class ChatState {
   constructor(file, { now = () => Date.now() } = {}) {
     this.file = file;
     this.now = now;
-    this.paused = {}; // jid → { since, until|null, reason }
+    this.paused = {}; // jid → { since, until|null, reason, label }
+    this.globalPaused = false; // زرار "إيقاف البوت" من صفحة التحكم
     this.unmatched = new Map(); // jid → عدد الرسايل المتتالية اللي البوت ما فهمهاش
     this.saveTimer = null;
     if (file && fs.existsSync(file)) {
       try {
-        this.paused = JSON.parse(fs.readFileSync(file, 'utf8')).paused || {};
+        const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+        this.paused = saved.paused || {};
+        this.globalPaused = Boolean(saved.globalPaused);
       } catch {
         this.paused = {};
       }
@@ -31,10 +34,14 @@ export class ChatState {
     return true;
   }
 
-  /** @param {number|null} hours عدد الساعات، أو null = لحد ما تكتب #bot */
-  pause(jid, reason, hours) {
+  /**
+   * @param {number|null} hours عدد الساعات، أو null = لحد ما تكتب #bot
+   * @param {string} [label] اسم/رقم العميل عشان يظهر في صفحة التحكم
+   */
+  pause(jid, reason, hours, label) {
     const since = this.now();
-    this.paused[jid] = { since, until: hours ? since + hours * 3600_000 : null, reason };
+    const prevLabel = this.paused[jid]?.label;
+    this.paused[jid] = { since, until: hours ? since + hours * 3600_000 : null, reason, label: label || prevLabel || jidLabel(jid) };
     this.unmatched.delete(jid);
     this.save();
   }
@@ -49,6 +56,19 @@ export class ChatState {
 
   pausedInfo(jid) {
     return this.paused[jid] || null;
+  }
+
+  /** كل المحادثات المتوقفة دلوقتي (بعد ما نشيل اللي مدتها خلصت)، الأحدث الأول */
+  listPaused() {
+    for (const jid of Object.keys(this.paused)) this.isPaused(jid);
+    return Object.entries(this.paused)
+      .map(([jid, p]) => ({ jid, ...p }))
+      .sort((a, b) => b.since - a.since);
+  }
+
+  setGlobalPaused(value) {
+    this.globalPaused = Boolean(value);
+    this.save();
   }
 
   bumpUnmatched(jid) {
@@ -73,7 +93,14 @@ export class ChatState {
     clearTimeout(this.saveTimer);
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
     const tmp = `${this.file}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ paused: this.paused }, null, 2));
+    fs.writeFileSync(tmp, JSON.stringify({ globalPaused: this.globalPaused, paused: this.paused }, null, 2));
     fs.renameSync(tmp, this.file);
   }
+}
+
+/** "201001234567@s.whatsapp.net" → "+201001234567" */
+export function jidLabel(jid) {
+  const [user, server] = String(jid).split('@');
+  const id = user.split(':')[0];
+  return server === 's.whatsapp.net' ? `+${id}` : id;
 }

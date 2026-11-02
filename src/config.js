@@ -44,6 +44,9 @@ export function loadConfig() {
       model: process.env.LLM_MODEL || '',
     },
 
+    dashboardPort: num('DASHBOARD_PORT', 3000),
+    openBrowser: bool('OPEN_BROWSER', true),
+
     logLevel: process.env.LOG_LEVEL || 'info',
   };
 
