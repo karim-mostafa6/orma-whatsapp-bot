@@ -1,5 +1,5 @@
 // نقطة التشغيل: البوت + صفحة التحكم.
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { loadConfig } from './config.js';
 import { createLogger } from './logger.js';
 import { createDb } from './db.js';
@@ -46,7 +46,14 @@ const handler = createHandler({
 // التأخيرات والأسئلة اللي العميل ما ردش عليها
 setInterval(() => handler.tick().catch((err) => logger.error({ err }, 'tick')), 10_000).unref();
 
-const auth = createAuth({ password: config.adminPassword, dataDir: config.dataDir, secure: Boolean(config.publicHost) });
+const auth = createAuth({ password: config.adminPassword, dataDir: config.dataDir, secure: Boolean(config.publicHost), trustProxy: config.trustProxy });
+
+let version = '';
+try {
+  version = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+} catch {
+  /* مش git checkout (مثلاً نسخة ويندوز الجاهزة) */
+}
 const dashboard = createDashboard({
   whatsapp,
   db,
@@ -55,6 +62,7 @@ const dashboard = createDashboard({
   allowedHosts: config.publicHost ? [config.publicHost] : [],
   getActivity: () => activity,
   logger,
+  system: { selfUpdate: config.selfUpdate, updateBranch: config.updateBranch, version },
 });
 
 function openBrowser(url) {

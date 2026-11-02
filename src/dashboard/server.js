@@ -2,6 +2,7 @@
 // على الكمبيوتر بتشتغل على 127.0.0.1 بس. على السيرفر بتبقى ورا HTTPS وباسورد.
 import fs from 'node:fs';
 import http from 'node:http';
+import { execFile } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { validateFlow } from '../flows/validate.js';
@@ -35,7 +36,34 @@ const httpError = (status, message) => Object.assign(new Error(message), { statu
  * @param {() => object[]} deps.getActivity
  * @param {object} deps.logger
  */
-export function createDashboard({ whatsapp, db, engine, auth, allowedHosts = [], getActivity, logger }) {
+export function createDashboard({ whatsapp, db, engine, auth, allowedHosts = [], getActivity, logger, system = {} }) {
+  let updating = false;
+
+  /** تحديث البوت من GitHub (على السيرفر). بعد النجاح البوت بيقفل، و systemd بيشغّله بالنسخة الجديدة */
+  function runUpdate() {
+    if (!system.selfUpdate) throw httpError(400, 'التحديث من الصفحة متاح على السيرفر بس');
+    if (updating) throw httpError(409, 'فيه تحديث شغال دلوقتي');
+    updating = true;
+    logger.info('⬇️ بننزّل آخر نسخة من البوت...');
+    return new Promise((resolve, reject) => {
+      execFile('bash', [path.join(ROOT, 'scripts', 'update.sh')], { cwd: ROOT, env: { ...process.env, UPDATE_BRANCH: system.updateBranch || 'main' }, timeout: 15 * 60_000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+        updating = false;
+        const out = String(stdout).trim().split('\n').pop() || '';
+        if (err) {
+          logger.error(`❌ التحديث فشل والبوت رجع للنسخة القديمة: ${String(stderr || err.message).slice(-300)}`);
+          return reject(httpError(500, 'التحديث فشل، والبوت لسه شغال بالنسخة القديمة'));
+        }
+        if (out.startsWith('UP_TO_DATE')) {
+          logger.info('✅ البوت على آخر نسخة أصلاً');
+          return resolve({ updated: false });
+        }
+        logger.info(`✅ اتحدّث (${out.split(' ')[1] || ''}) — البوت بيعمل restart`);
+        resolve({ updated: true, restarting: true });
+        setTimeout(() => process.exit(0), 1500).unref?.();
+      });
+    });
+  }
+
   const sims = new Map(); // تجارب "جرّب البوت": كل جلسة ليها بيانات في الذاكرة بس
 
   function contactSummary(c) {
@@ -81,7 +109,8 @@ export function createDashboard({ whatsapp, db, engine, auth, allowedHosts = [],
   }
 
   const routes = {
-    'GET /api/me': () => ({ loggedIn: true, authRequired: auth.required }),
+    'GET /api/me': () => ({ loggedIn: true, authRequired: auth.required, selfUpdate: Boolean(system.selfUpdate), version: system.version || '' }),
+    'POST /api/system/update': () => runUpdate(),
 
     'GET /api/status': () => ({
       connection: whatsapp.status.connection,

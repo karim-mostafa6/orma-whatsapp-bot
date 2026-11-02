@@ -8,7 +8,7 @@ import path from 'node:path';
 const COOKIE = 'orma_session';
 const MAX_AGE_S = 30 * 24 * 3600;
 
-export function createAuth({ password, dataDir, secure }) {
+export function createAuth({ password, dataDir, secure, trustProxy = false }) {
   let secretFile = null;
   let fileSecret = crypto.randomBytes(32).toString('hex');
   if (dataDir) {
@@ -49,7 +49,10 @@ export function createAuth({ password, dataDir, secure }) {
 
     /** @returns {string|null} الكوكي لو الباسورد صح */
     login(req, given) {
-      const ip = req.socket.remoteAddress || '';
+      // ورا Caddy كل الطلبات جاية من 127.0.0.1، فالـ IP الحقيقي آخر قيمة في X-Forwarded-For
+      // (Caddy بيضيف IP العميل في الآخر وبيتجاهل اللي العميل بعته بنفسه)
+      const fwd = trustProxy ? String(req.headers['x-forwarded-for'] || '').split(',').pop().trim() : '';
+      const ip = fwd || req.socket.remoteAddress || '';
       const now = Date.now();
       const recent = (attempts.get(ip) || []).filter((t) => now - t < 60_000);
       if (recent.length >= 5) throw Object.assign(new Error('محاولات كتير. استنى دقيقة وجرّب تاني.'), { status: 429 });

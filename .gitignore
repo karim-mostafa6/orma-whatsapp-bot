@@ -13,3 +13,4 @@ data/runs.json
 data/session.key
 data/*.tmp
 data/*.broken-*
+.npm-cache/

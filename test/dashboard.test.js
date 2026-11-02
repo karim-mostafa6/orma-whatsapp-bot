@@ -129,3 +129,19 @@ test('رجّع البوت لعميل + زرار الإيقاف العام + فك
   await authed('POST', '/api/whatsapp/logout', {});
   assert.equal(loggedOut, true);
 });
+
+test('التحديث من الصفحة مقفول لو مش على السيرفر', async () => {
+  const r = await authed('POST', '/api/system/update', {});
+  assert.equal(r.status, 400);
+  const me = (await authed('GET', '/api/me')).json;
+  assert.equal(me.selfUpdate, false);
+});
+
+test('ورا Caddy: حد محاولات الدخول بيتحسب لكل زائر لوحده (مش للكل)', () => {
+  const a = createAuth({ password: 'secret-pass-1', dataDir: null, secure: true, trustProxy: true });
+  const req = (ip) => ({ socket: { remoteAddress: '127.0.0.1' }, headers: { 'x-forwarded-for': `6.6.6.6, ${ip}` } });
+  for (let i = 0; i < 5; i++) assert.equal(a.login(req('1.1.1.1'), 'wrong'), null);
+  assert.throws(() => a.login(req('1.1.1.1'), 'secret-pass-1'), /محاولات كتير/);
+  // زائر تاني (إنت) لسه يقدر يدخل — والقيمة المزوّرة اللي في أول الهيدر ما بتتحسبش
+  assert.match(a.login(req('2.2.2.2'), 'secret-pass-1'), /Secure/);
+});

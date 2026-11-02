@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Save, LogOut, Unlink } from 'lucide-react';
+import { Save, LogOut, Unlink, RefreshCw } from 'lucide-react';
 import { api } from '../api.js';
 import { Switch, useToast } from '../ui.jsx';
 
@@ -7,7 +7,9 @@ export default function SettingsPage({ status, onAuthError }) {
   const toast = useToast();
   const [s, setS] = useState(null);
   const [saved, setSaved] = useState('');
-  const [authRequired, setAuthRequired] = useState(false);
+  const [me, setMe] = useState({});
+  const [updating, setUpdating] = useState('');
+  const authRequired = me.authRequired;
 
   useEffect(() => {
     api('GET', '/api/settings')
@@ -16,7 +18,7 @@ export default function SettingsPage({ status, onAuthError }) {
         setSaved(JSON.stringify(x));
       })
       .catch(onAuthError);
-    api('GET', '/api/me').then((m) => setAuthRequired(m.authRequired)).catch(() => {});
+    api('GET', '/api/me').then(setMe).catch(() => {});
   }, [onAuthError]);
 
   if (!s) return <div className="page empty">بيحمّل...</div>;
@@ -100,6 +102,52 @@ export default function SettingsPage({ status, onAuthError }) {
           <small>{'{reason}'} = السبب، {'{customer}'} = اسم العميل ورقمه، {'{message}'} = رسالته</small>
         </label>
       </div>
+
+      {me.selfUpdate && (
+        <div className="card">
+          <h2>🔄 تحديث البوت</h2>
+          <p className="hint">
+            بينزّل آخر نسخة من البوت ويشغّلها. الـ Flows والمحادثات وربط الرقم بيفضلوا زي ما هم.
+            {me.version && <> النسخة الحالية: <code dir="ltr">{me.version}</code></>}
+          </p>
+          <button
+            className="btn"
+            disabled={Boolean(updating)}
+            onClick={async () => {
+              setUpdating('بننزّل التحديث... (ممكن ياخد دقيقتين)');
+              try {
+                const r = await api('POST', '/api/system/update', {});
+                if (!r.updated) {
+                  setUpdating('');
+                  toast('✅ البوت على آخر نسخة أصلاً');
+                  return;
+                }
+                setUpdating('✅ اتحدّث! البوت بيعمل restart، الصفحة هتفتح تاني لوحدها...');
+                // نستنى البوت يرجع وبعدين نعمل reload
+                const started = Date.now();
+                const wait = async () => {
+                  await new Promise((res) => setTimeout(res, 3000));
+                  try {
+                    await api('GET', '/api/me');
+                    window.location.reload();
+                  } catch {
+                    if (Date.now() - started < 120_000) wait();
+                    else setUpdating('البوت لسه بيقوم... اعمل Refresh بعد شوية.');
+                  }
+                };
+                wait();
+              } catch (err) {
+                onAuthError(err);
+                setUpdating('');
+                toast(err.message, true);
+              }
+            }}
+          >
+            <RefreshCw size={14} /> حدّث البوت لآخر نسخة
+          </button>
+          {updating && <p className="hint" style={{ marginTop: 10 }}>{updating}</p>}
+        </div>
+      )}
 
       <div className="card">
         <h2>🔐 الحساب</h2>

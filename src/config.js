@@ -43,6 +43,9 @@ export function loadConfig() {
     bindHost: process.env.BIND_HOST || '127.0.0.1',
     publicHost: (process.env.PUBLIC_HOST || '').trim().toLowerCase(),
     adminPassword: process.env.ADMIN_PASSWORD || '',
+    trustProxy: bool('TRUST_PROXY', false), // ورا Caddy: الـ IP الحقيقي في X-Forwarded-For
+    selfUpdate: bool('SELF_UPDATE', false), // زرار «تحديث البوت» (على السيرفر بس)
+    updateBranch: process.env.UPDATE_BRANCH || 'main',
 
     logLevel: process.env.LOG_LEVEL || 'info',
   };

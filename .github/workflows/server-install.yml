@@ -1,0 +1,64 @@
+# بيجرّب سكريبت التسطيب على سيرفر Ubuntu حقيقي (زي Oracle) قبل ما صاحب المتجر يستخدمه.
+name: Server install test
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: server-install-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PASS: ci-test-pass-123
+      BRANCH: ${{ github.head_ref || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the installer (first time)
+        run: sudo DOMAIN=localhost ADMIN_PASSWORD="$PASS" ORMA_BRANCH="$BRANCH" bash scripts/install-server.sh
+
+      - name: Check the service, HTTPS, login and WhatsApp QR
+        run: |
+          set -e
+          systemctl is-active orma-bot caddy
+          # الصفحة على HTTPS (Caddy بيعمل شهادة محلية لـ localhost)
+          for i in $(seq 1 20); do curl -sk -o page.html https://localhost/ && break; sleep 2; done
+          grep -q ORMA page.html
+          # من غير دخول: ممنوع
+          test "$(curl -sk -o /dev/null -w '%{http_code}' https://localhost/api/status)" = 401
+          # دخول
+          curl -sk -c jar -H 'Content-Type: application/json' -d "{\"password\":\"$PASS\"}" https://localhost/api/login | grep -q '"ok":true'
+          grep -q orma_session jar
+          # البوت بيطلّع QR من الواتساب
+          ok=0
+          for i in $(seq 1 45); do
+            s=$(curl -sk -b jar https://localhost/api/status)
+            echo "$s" | head -c 120; echo
+            if echo "$s" | grep -q '"connection":"qr"'; then ok=1; break; fi
+            sleep 2
+          done
+          test "$(curl -sk -b jar https://localhost/api/flows | grep -o '"id":"flow_' | wc -l)" -ge 10
+          if [ "$ok" = 1 ]; then echo "OK: WhatsApp QR received on Linux"; else echo "::warning::no WhatsApp QR within 90s on CI"; fi
+
+      - name: Run the installer again (must keep password and data)
+        run: |
+          set -e
+          sudo ORMA_BRANCH="$BRANCH" bash scripts/install-server.sh
+          sudo grep -q "ADMIN_PASSWORD=$PASS" /opt/orma-bot/.env
+          for i in $(seq 1 20); do curl -sk -o /dev/null https://localhost/ && break; sleep 2; done
+          curl -sk -H 'Content-Type: application/json' -d "{\"password\":\"$PASS\"}" https://localhost/api/login | grep -q '"ok":true'
+          sudo test -f /opt/orma-bot/data/flows.json
+
+      - name: Update script (as the service user)
+        run: sudo -u orma env HOME=/opt/orma-bot UPDATE_BRANCH="$BRANCH" bash /opt/orma-bot/scripts/update.sh | tee out.txt && grep -q UP_TO_DATE out.txt
+
+      - name: Logs
+        if: always()
+        run: |
+          sudo journalctl -u orma-bot -n 60 --no-pager || true
+          sudo journalctl -u caddy -n 20 --no-pager || true
