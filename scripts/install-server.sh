@@ -57,6 +57,7 @@ if ! command -v node >/dev/null || [ "$(node -p 'process.versions.node.split("."
   "${APT[@]}" install nodejs
 fi
 node -v
+NODE_BIN=$(readlink -f "$(command -v node)") # المسار الحقيقي (مش دايماً /usr/bin/node)
 
 # ---------------------------------------------------------------------------
 log "4/8 تسطيب Caddy (HTTPS تلقائي)"
@@ -145,9 +146,10 @@ User=$APP_USER
 Group=$APP_USER
 WorkingDirectory=$APP_DIR
 Environment=NODE_ENV=production
+Environment=PATH=$(dirname "$NODE_BIN"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=HOME=$APP_DIR
 Environment=npm_config_cache=$APP_DIR/.npm-cache
-ExecStart=/usr/bin/node src/index.js
+ExecStart=$NODE_BIN src/index.js
 Restart=always
 RestartSec=5
 NoNewPrivileges=true
