@@ -1,0 +1,7 @@
+node_modules/
+# جلسة واتساب: فيها مفاتيح الدخول على رقمك، ما ترفعهاش على GitHub أبداً
+auth/
+.env
+data/state.json
+*.tmp
+*.log
