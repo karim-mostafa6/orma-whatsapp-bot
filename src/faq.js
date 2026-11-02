@@ -1,6 +1,5 @@
-// تحميل data/faq.json ومراقبته: أي تعديل في الملف بيتقري تلقائياً من غير restart.
-// لو الملف اتحفظ وفيه غلطة (JSON مكسور أو حاجة ناقصة)، البوت بيكمّل بالنسخة القديمة
-// وبيكتب الغلطة في اللوج، عشان ما يقعش.
+// data/faq.json = الردود القديمة. أول تشغيل بتتحوّل لـ Flows (flows/defaults.js).
+// الملف ده فيه كمان render() اللي بيبدّل المتغيرات {store_url} في الرسايل.
 import fs from 'node:fs';
 import { compileKeywords } from './matcher.js';
 
@@ -62,29 +61,3 @@ export function unfilledVariables(faq) {
     .map(([k]) => k);
 }
 
-function warnUnfilled(faq, logger) {
-  const missing = unfilledVariables(faq);
-  if (missing.length) {
-    logger.warn(`⚠️ لسه فيه معلومات ناقصة في faq.json ← variables: ${missing.join(', ')}. العملاء هيشوفوا علامة ⚠️ في الردود لحد ما تكتبها.`);
-  }
-}
-
-/** بيرجّع object فيه .current (آخر نسخة سليمة) وبيراقب الملف. */
-export function watchFaq(file, logger) {
-  const holder = { current: loadFaqFile(file) };
-  logger.info(`تم تحميل ${holder.current.intents.length} موضوع من ${file}`);
-  warnUnfilled(holder.current, logger);
-
-  // watchFile (polling) أضمن من fs.watch مع المحررات اللي بتحفظ بملف مؤقت وتعمل rename
-  fs.watchFile(file, { interval: 2000 }, (curr, prev) => {
-    if (curr.mtimeMs === prev.mtimeMs) return;
-    try {
-      holder.current = loadFaqFile(file);
-      logger.info(`✅ faq.json اتحدّث (${holder.current.intents.length} موضوع)`);
-      warnUnfilled(holder.current, logger);
-    } catch (err) {
-      logger.error(`❌ faq.json فيه غلطة، البوت مكمّل بالنسخة القديمة: ${err.message}`);
-    }
-  });
-  return holder;
-}

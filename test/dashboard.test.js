@@ -1,102 +1,147 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import http from 'node:http';
 import { createDashboard } from '../src/dashboard/server.js';
-import { loadFaqFile } from '../src/faq.js';
-import { ChatState } from '../src/state.js';
-import { createKeywordResponder } from '../src/responders/keyword.js';
+import { createAuth } from '../src/dashboard/auth.js';
+import { createDb } from '../src/db.js';
+import { createEngine } from '../src/flows/engine.js';
+import { defaultFlows, defaultSettings } from '../src/flows/defaults.js';
 
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orma-dash-'));
-const faqFile = path.join(dir, 'faq.json');
-fs.copyFileSync(new URL('../data/faq.json', import.meta.url), faqFile);
-
-const faq = { current: loadFaqFile(faqFile) };
-const state = new ChatState(null);
-let loggedOut = false;
-const whatsapp = { status: { connection: 'qr', qr: 'data:image/png;base64,xx', me: null }, logout: async () => (loggedOut = true) };
+const CFG = { minDelayMs: 0, maxDelayMs: 0, markAsRead: true, handoffHours: 12, ownerReplyPauseHours: 12, notifyOwner: true, deleteOwnerCommands: true, maxRepliesPerMinute: 4 };
 const silent = { info() {}, warn() {}, error() {}, debug() {} };
-const server = createDashboard({ whatsapp, faq, faqFile, state, responder: createKeywordResponder(), getActivity: () => [{ msg: 'x' }], logger: silent });
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orma-dash-'));
+
+const db = createDb(null);
+db.setSettings(defaultSettings(CFG, null));
+db.setFlows(defaultFlows(null));
+const engine = createEngine({ db, logger: silent, transport: { send: async () => {}, notifyOwner: async () => {} } });
+let loggedOut = false;
+const whatsapp = { status: { connection: 'qr', qr: 'data:x', me: null }, logout: async () => (loggedOut = true) };
+const auth = createAuth({ password: 'secret-pass-1', dataDir: dir, secure: false });
+const server = createDashboard({ whatsapp, db, engine, auth, allowedHosts: ['bot.example.com'], getActivity: () => [], logger: silent });
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
-const base = `http://127.0.0.1:${server.address().port}`;
+const port = server.address().port;
 after(() => server.close());
 
-const call = (method, url, body, headers = {}) =>
-  fetch(base + url, { method, headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined });
+function call(method, url, body, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { host: '127.0.0.1', port, path: url, method, headers: { ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...headers } },
+      (res) => {
+        let data = '';
+        res.on('data', (c) => (data += c));
+        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, json: data ? safeJson(data) : null }));
+      }
+    );
+    req.on('error', reject);
+    if (body !== undefined) req.end(typeof body === 'string' ? body : JSON.stringify(body));
+    else req.end();
+  });
+}
+const safeJson = (s) => {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return s;
+  }
+};
 
-test('الصفحة نفسها بتفتح', async () => {
-  const res = await call('GET', '/');
-  assert.equal(res.status, 200);
-  assert.match(await res.text(), /ORMA/);
+let cookie = '';
+const authed = (method, url, body) => call(method, url, body, { Cookie: cookie });
+
+test('من غير دخول: ممنوع', async () => {
+  assert.equal((await call('GET', '/api/status')).status, 401);
+  assert.equal((await call('GET', '/api/flows')).status, 401);
 });
 
-test('status فيه الـ QR والمعلومات الناقصة', async () => {
-  const s = await (await call('GET', '/api/status')).json();
-  assert.equal(s.connection, 'qr');
-  assert.ok(s.qr);
-  assert.ok(s.missing.includes('store_url'));
+test('باسورد غلط بيترفض، وبعد 5 محاولات بيوقف شوية', async () => {
+  for (let i = 0; i < 4; i++) assert.equal((await call('POST', '/api/login', { password: 'wrong' })).status, 401);
+  assert.equal((await call('POST', '/api/login', { password: 'wrong' })).status, 401);
+  assert.equal((await call('POST', '/api/login', { password: 'secret-pass-1' })).status, 429);
 });
 
-test('حفظ الردود من الصفحة بيكتب الملف وبيحدّث البوت على طول', async () => {
-  const draft = await (await call('GET', '/api/faq')).json();
-  draft.variables.store_url = 'https://orma.test';
-  draft.intents.push({ id: 'custom', title: 'تفصيل', keywords: ['حفر'], answer: 'بنعمل حفر ✨ {store_url}' });
-  const res = await call('PUT', '/api/faq', draft);
-  assert.equal(res.status, 200);
-  assert.ok(JSON.parse(fs.readFileSync(faqFile, 'utf8')).variables.store_url === 'https://orma.test');
-  const t = await (await call('POST', '/api/test', { text: 'ممكن حفر اسم؟' })).json();
-  assert.equal(t.text, 'بنعمل حفر ✨ https://orma.test');
+test('دخول صح بيدّي كوكي آمنة', async () => {
+  // مفتاح جلسة جديد لـ IP جديد مش متاح هنا، فبنعمل auth جديد بنفس المفتاح
+  const auth2 = createAuth({ password: 'secret-pass-1', dataDir: dir, secure: false });
+  const fakeReq = { socket: { remoteAddress: '10.0.0.9' } };
+  const c = auth2.login(fakeReq, 'secret-pass-1');
+  assert.match(c, /HttpOnly; SameSite=Strict/);
+  cookie = c.split(';')[0];
+  assert.equal((await authed('GET', '/api/status')).status, 200);
 });
 
-test('حفظ ملف غلط بيترفض برسالة واضحة والملف ما بيتغيرش', async () => {
-  const before = fs.readFileSync(faqFile, 'utf8');
-  const res = await call('PUT', '/api/faq', { intents: [] });
-  assert.equal(res.status, 400);
-  assert.match((await res.json()).error, /intents/);
-  assert.equal(fs.readFileSync(faqFile, 'utf8'), before);
+test('كوكي متزوّرة ما بتشتغلش', async () => {
+  assert.equal((await call('GET', '/api/status', undefined, { Cookie: 'orma_session=9999999999.fake' })).status, 401);
 });
 
-test('التجربة بتستخدم التعديلات اللي لسه ما اتحفظتش', async () => {
-  const draft = await (await call('GET', '/api/faq')).json();
-  draft.intents.find((i) => i.id === 'shipping').answer = 'رد تجريبي';
-  const t = await (await call('POST', '/api/test', { text: 'الشحن', faq: draft })).json();
-  assert.equal(t.text, 'رد تجريبي');
-  const h = await (await call('POST', '/api/test', { text: 'عايز اكلم موظف' })).json();
-  assert.equal(h.type, 'handoff');
+test('دومين غريب ممنوع، والدومين بتاعنا مسموح', async () => {
+  assert.equal((await call('GET', '/api/status', undefined, { Host: 'evil.example' })).status, 403);
+  assert.notEqual((await call('GET', '/', undefined, { Host: 'bot.example.com' })).status, 403);
 });
 
-test('قائمة العملاء المحتاجين موظف + زرار رجّع البوت', async () => {
-  state.pause('201001112222@s.whatsapp.net', 'customer_request', 12, 'Mona +201001112222');
-  const list = await (await call('GET', '/api/chats')).json();
-  assert.equal(list[0].label, 'Mona +201001112222');
-  await call('POST', '/api/chats/resume', { jid: '201001112222@s.whatsapp.net' });
-  assert.equal((await (await call('GET', '/api/chats')).json()).length, 0);
+test('الأوامر لازم JSON (حماية من المواقع التانية)', async () => {
+  assert.equal((await call('POST', '/api/bot', '{"paused":true}', { Cookie: cookie, 'Content-Type': 'text/plain' })).status, 415);
+  assert.equal(db.getSettings().globalPaused, false);
 });
 
-test('زرار إيقاف/تشغيل البوت', async () => {
-  await call('POST', '/api/bot', { paused: true });
-  assert.equal(state.globalPaused, true);
-  await call('POST', '/api/bot', { paused: false });
-  assert.equal(state.globalPaused, false);
+test('حفظ Flow: الشغال لازم يكون سليم، والمتوقف يتحفظ عادي', async () => {
+  const bad = { id: 'f1', name: 'x', status: 'active', nodes: [{ id: 't', type: 'trigger', position: { x: 0, y: 0 }, data: { event: 'keywords', keywords: [] } }], edges: [] };
+  const r1 = await authed('POST', '/api/flows/save', { flow: bad });
+  assert.equal(r1.status, 400);
+  const r2 = await authed('POST', '/api/flows/save', { flow: { ...bad, status: 'paused' } });
+  assert.equal(r2.status, 200);
+  assert.ok(db.getFlow('f1'));
+  assert.equal((await authed('POST', '/api/flows/status', { id: 'f1', status: 'active' })).status, 400);
+  await authed('POST', '/api/flows/delete', { id: 'f1' });
+  assert.equal(db.getFlow('f1'), null);
 });
 
-test('فك ربط الرقم', async () => {
-  await call('POST', '/api/logout', {});
+test('التجربة بتشتغل على نسخة منفصلة وما بتلمسش العملاء الحقيقيين', async () => {
+  await authed('POST', '/api/simulate', { session: 's1', reset: true });
+  const r = await authed('POST', '/api/simulate', { session: 's1', text: 'عايز اكلم موظف' });
+  assert.equal(r.status, 200);
+  assert.ok(r.json.messages.length >= 1);
+  assert.equal(r.json.paused, true);
+  assert.equal(db.listContacts().length, 0);
+});
+
+test('الإعدادات: بتتحفظ وبتتظبط في حدود معقولة', async () => {
+  const r = await authed('PUT', '/api/settings', { behavior: { minDelayMs: 5000, maxDelayMs: 1000, maxRepliesPerMinute: 999 }, variables: { store_url: 'https://orma.test' } });
+  assert.equal(r.status, 200);
+  const b = db.getSettings().behavior;
+  assert.equal(b.minDelayMs, 5000);
+  assert.equal(b.maxDelayMs, 5000);
+  assert.equal(b.maxRepliesPerMinute, 30);
+  assert.equal(db.getSettings().variables.store_url, 'https://orma.test');
+});
+
+test('رجّع البوت لعميل + زرار الإيقاف العام + فك الربط', async () => {
+  engine.pauseContact('201001@s.whatsapp.net', 'dashboard', null, { name: 'Mona' });
+  const list = (await authed('GET', '/api/contacts')).json;
+  assert.equal(list[0].paused.reason, 'dashboard');
+  await authed('POST', '/api/contacts/resume', { jid: '201001@s.whatsapp.net' });
+  assert.equal(engine.isPaused('201001@s.whatsapp.net'), false);
+  await authed('POST', '/api/bot', { paused: true });
+  assert.equal(db.getSettings().globalPaused, true);
+  await authed('POST', '/api/whatsapp/logout', {});
   assert.equal(loggedOut, true);
 });
 
-test('حماية: مواقع تانية ما تقدرش تكلم الصفحة', async () => {
-  // fetch ما بيسمحش بتغيير الـ Host، فبنستخدم http.request
-  const status = await new Promise((resolve, reject) => {
-    http.get({ host: '127.0.0.1', port: server.address().port, path: '/api/status', headers: { Host: 'evil.example' } }, (res) => {
-      res.resume();
-      resolve(res.statusCode);
-    }).on('error', reject);
-  });
-  assert.equal(status, 403);
-  const form = await fetch(base + '/api/bot', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: '{"paused":true}' });
-  assert.equal(form.status, 415);
-  assert.equal(state.globalPaused, false);
+test('التحديث من الصفحة مقفول لو مش على السيرفر', async () => {
+  const r = await authed('POST', '/api/system/update', {});
+  assert.equal(r.status, 400);
+  const me = (await authed('GET', '/api/me')).json;
+  assert.equal(me.selfUpdate, false);
+});
+
+test('ورا Caddy: حد محاولات الدخول بيتحسب لكل زائر لوحده (مش للكل)', () => {
+  const a = createAuth({ password: 'secret-pass-1', dataDir: null, secure: true, trustProxy: true });
+  const req = (ip) => ({ socket: { remoteAddress: '127.0.0.1' }, headers: { 'x-forwarded-for': `6.6.6.6, ${ip}` } });
+  for (let i = 0; i < 5; i++) assert.equal(a.login(req('1.1.1.1'), 'wrong'), null);
+  assert.throws(() => a.login(req('1.1.1.1'), 'secret-pass-1'), /محاولات كتير/);
+  // زائر تاني (إنت) لسه يقدر يدخل — والقيمة المزوّرة اللي في أول الهيدر ما بتتحسبش
+  assert.match(a.login(req('2.2.2.2'), 'secret-pass-1'), /Secure/);
 });

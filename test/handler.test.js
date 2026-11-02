@@ -1,191 +1,102 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHandler } from '../src/handler.js';
-import { prepareFaq } from '../src/faq.js';
-import { ChatState } from '../src/state.js';
-import { createKeywordResponder } from '../src/responders/keyword.js';
-import { createHybridResponder } from '../src/responders/llm.js';
+import { createDb } from '../src/db.js';
+import { createEngine } from '../src/flows/engine.js';
+import { defaultSettings } from '../src/flows/defaults.js';
 
 const CUSTOMER = '201000000001@s.whatsapp.net';
-const ME = '201099999999@s.whatsapp.net';
+const CFG = { minDelayMs: 0, maxDelayMs: 0, markAsRead: true, handoffHours: 12, ownerReplyPauseHours: 12, notifyOwner: true, deleteOwnerCommands: true, maxRepliesPerMinute: 4 };
+const silent = { info() {}, warn() {}, error() {}, debug() {} };
+const n = (id, type, data) => ({ id, type, position: { x: 0, y: 0 }, data });
+const FLOWS = [
+  { id: 'ship', name: 'شحن', status: 'active', nodes: [n('t', 'trigger', { event: 'keywords', keywords: ['شحن'] }), n('m', 'send_message', { texts: ['SHIPPING'] })], edges: [{ id: 'e', source: 't', sourceHandle: 'next', target: 'm' }] },
+];
 
-const FAQ = prepareFaq({
-  variables: { store_name: 'ORMA' },
-  handoff_keywords: ['موظف'],
-  intents: [
-    { id: 'greeting', smalltalk: true, keywords: ['اهلا'], answer: 'أهلاً في {store_name}' },
-    { id: 'shipping', keywords: ['شحن'], answer: 'SHIPPING' },
-    { id: 'order_status', handoff: true, keywords: ['اوردري'], answer: 'ORDER' },
-  ],
-  system: { handoff: 'HANDOFF', fallback: 'FALLBACK', fallback_handoff: 'FALLBACK_HANDOFF', media: 'MEDIA', owner_notify: 'NOTIFY {reason}' },
-});
-
-function setup(overrides = {}) {
+function setup(behavior = {}) {
   let clock = 1_700_000_000_000;
+  const db = createDb(null, { now: () => clock });
+  const s = defaultSettings(CFG, null);
+  db.setSettings({ ...s, behavior: { ...s.behavior, ...behavior } });
+  db.setFlows(FLOWS);
   const sent = [];
   const presence = [];
-  let n = 0;
+  let id = 0;
   const sock = {
     user: { id: '201099999999:5@s.whatsapp.net' },
     readMessages: async () => {},
     presenceSubscribe: async () => {},
-    sendPresenceUpdate: async (type, jid) => presence.push([type, jid]),
+    sendPresenceUpdate: async (type) => presence.push(type),
     sendMessage: async (jid, content) => {
       sent.push({ jid, content });
-      return { key: { id: `BOT${++n}`, remoteJid: jid, fromMe: true } };
+      return { key: { id: `BOT${++id}`, remoteJid: jid, fromMe: true } };
     },
   };
-  const config = {
-    minDelayMs: 0,
-    maxDelayMs: 0,
-    markAsRead: true,
-    handoffHours: 12,
-    ownerReplyPauseHours: 12,
-    unmatchedBeforeHandoff: 2,
-    maxRepliesPerMinute: 4,
-    maxMessageAgeMinutes: 60,
-    notifyOwner: true,
-    deleteOwnerCommands: true,
-    ...overrides,
-  };
-  const now = () => clock;
-  const state = new ChatState(null, { now });
-  const silent = { debug() {}, info() {}, warn() {}, error() {} };
   const handler = createHandler({
     getSock: () => sock,
-    faq: { current: FAQ },
-    state,
-    responder: overrides.responder || createKeywordResponder(),
-    config,
+    db,
+    makeEngine: (transport) => createEngine({ db, transport, logger: silent, now: () => clock }),
+    config: { maxMessageAgeMinutes: 60 },
     logger: silent,
-    now,
+    now: () => clock,
   });
-  let id = 0;
+  let mid = 0;
   const incoming = (text, extra = {}) =>
     handler.onMessagesUpsert({
       type: extra.type || 'notify',
       messages: [
         {
-          key: { remoteJid: extra.jid || CUSTOMER, id: `IN${++id}`, fromMe: Boolean(extra.fromMe) },
+          key: { remoteJid: extra.jid || CUSTOMER, id: `IN${++mid}`, fromMe: Boolean(extra.fromMe) },
           message: extra.message || { conversation: text },
           messageTimestamp: Math.floor((extra.ts ?? clock) / 1000),
           pushName: 'Sara',
         },
       ],
     });
-  const toCustomer = () => sent.filter((s) => s.jid === CUSTOMER && s.content.text).map((s) => s.content.text);
-  const toMe = () => sent.filter((s) => s.jid === ME).map((s) => s.content.text);
-  return { incoming, sent, presence, state, toCustomer, toMe, tick: (ms) => (clock += ms), handler };
+  const toCustomer = () => sent.filter((x) => x.jid === CUSTOMER && x.content.text).map((x) => x.content.text);
+  return { incoming, sent, presence, db, handler, toCustomer, tick: (ms) => (clock += ms) };
 }
 
-test('بيرد على السؤال، وبيظهر typing قبل الرد وبيرجع unavailable بعده', async () => {
+test('بيرد بالـ Flow، وبيظهر typing قبل الرد وبيرجع unavailable بعده', async () => {
   const t = setup();
   await t.incoming('الشحن بكام؟');
   assert.deepEqual(t.toCustomer(), ['SHIPPING']);
-  const types = t.presence.map((p) => p[0]);
-  assert.deepEqual(types, ['available', 'composing', 'paused', 'unavailable']);
+  assert.deepEqual(t.presence, ['available', 'composing', 'paused', 'unavailable']);
+  const c = t.db.getContact(CUSTOMER);
+  assert.equal(c.name, 'Sara');
+  assert.equal(c.phone, '201000000001');
 });
 
-test('المتغيرات بتتبدّل في الرد', async () => {
+test('إنت رديت بنفسك → البوت يسكت في المحادثة دي', async () => {
   const t = setup();
-  await t.incoming('اهلا');
-  assert.deepEqual(t.toCustomer(), ['أهلاً في ORMA']);
-});
-
-test('طلب موظف → رسالة تحويل + البوت يسكت + إشعار ليك', async () => {
-  const t = setup();
-  await t.incoming('عايز موظف');
-  assert.deepEqual(t.toCustomer(), ['HANDOFF']);
-  assert.deepEqual(t.toMe(), ['NOTIFY عميل طلب يكلم موظف']);
-  await t.incoming('الشحن بكام؟');
-  assert.deepEqual(t.toCustomer(), ['HANDOFF']); // ما ردش تاني
-});
-
-test('بعد مدة التحويل (HANDOFF_HOURS) البوت يرجع يرد لوحده', async () => {
-  const t = setup();
-  await t.incoming('موظف');
-  t.tick(12 * 3600_000 + 1);
-  await t.incoming('شحن');
-  assert.deepEqual(t.toCustomer(), ['HANDOFF', 'SHIPPING']);
-});
-
-test('موضوع عليه handoff: true → يرد بالإجابة وبعدين يسكت', async () => {
-  const t = setup();
-  await t.incoming('فين اوردري');
-  await t.incoming('شحن');
-  assert.deepEqual(t.toCustomer(), ['ORDER']);
-  assert.equal(t.toMe().length, 1);
-});
-
-test('مش فاهم: أول مرة رسالة توضيح، تاني مرة تحويل لموظف', async () => {
-  const t = setup();
-  await t.incoming('ايه الاخبار');
-  await t.incoming('بقولك ايه');
-  await t.incoming('شحن');
-  assert.deepEqual(t.toCustomer(), ['FALLBACK', 'FALLBACK_HANDOFF']);
-});
-
-test('رسالة مفهومة بين رسالتين مش مفهومين بتصفّر العدّاد', async () => {
-  const t = setup();
-  await t.incoming('ايه الاخبار');
-  await t.incoming('شحن');
-  await t.incoming('بقولك ايه');
-  assert.deepEqual(t.toCustomer(), ['FALLBACK', 'SHIPPING', 'FALLBACK']);
-});
-
-test('صورة أو ريكورد من غير كلام → تحويل لموظف', async () => {
-  const t = setup();
-  await t.incoming('', { message: { audioMessage: { seconds: 5 } } });
-  assert.deepEqual(t.toCustomer(), ['MEDIA']);
-  assert.ok(t.state.isPaused(CUSTOMER));
-});
-
-test('صورة عليها كلام → بيرد على الكلام', async () => {
-  const t = setup();
-  await t.incoming('', { message: { imageMessage: { caption: 'الشحن؟' } } });
-  assert.deepEqual(t.toCustomer(), ['SHIPPING']);
-});
-
-test('إنت رديت بنفسك من الموبايل → البوت يسكت في المحادثة دي', async () => {
-  const t = setup();
-  await t.incoming('أهلاً يا سارة، أنا معاكي', { fromMe: true });
+  await t.incoming('أهلاً يا سارة', { fromMe: true });
   await t.incoming('شحن');
   assert.deepEqual(t.toCustomer(), []);
-  assert.equal(t.state.pausedInfo(CUSTOMER).reason, 'owner_reply');
+  assert.equal(t.db.getContact(CUSTOMER).paused.reason, 'owner_reply');
 });
 
-test('#bot بيرجّع البوت، و #stop بيوقفه لحد #bot، والأمر بيتمسح', async () => {
+test('#stop بيوقف لحد #bot، والأمر بيتمسح، وردك العادي ما يلغيش #stop', async () => {
   const t = setup();
   await t.incoming('#stop', { fromMe: true });
-  assert.equal(t.state.pausedInfo(CUSTOMER).until, null);
+  await t.incoming('تمام', { fromMe: true });
+  assert.equal(t.db.getContact(CUSTOMER).paused.until, null);
   t.tick(100 * 3600_000);
   await t.incoming('شحن');
   assert.deepEqual(t.toCustomer(), []);
   await t.incoming('#BOT', { fromMe: true });
   await t.incoming('شحن');
   assert.deepEqual(t.toCustomer(), ['SHIPPING']);
-  assert.equal(t.sent.filter((s) => s.content.delete).length, 2);
-});
-
-test('ردك العادي ما يلغيش #stop', async () => {
-  const t = setup();
-  await t.incoming('#stop', { fromMe: true });
-  await t.incoming('تمام', { fromMe: true });
-  assert.equal(t.state.pausedInfo(CUSTOMER).until, null);
+  assert.equal(t.sent.filter((x) => x.content.delete).length, 2);
 });
 
 test('رسايل البوت نفسه ما تتحسبش كأنك رديت', async () => {
   const t = setup();
   await t.incoming('شحن');
-  // نفس ID الرسالة اللي البوت بعتها راجع كـ fromMe
-  await t.handler.onMessagesUpsert({
-    type: 'append',
-    messages: [{ key: { remoteJid: CUSTOMER, id: 'BOT1', fromMe: true }, message: { conversation: 'SHIPPING' }, messageTimestamp: 1_700_000_000 }],
-  });
-  assert.equal(t.state.isPaused(CUSTOMER), false);
+  await t.handler.onMessagesUpsert({ type: 'append', messages: [{ key: { remoteJid: CUSTOMER, id: 'BOT1', fromMe: true }, message: { conversation: 'SHIPPING' }, messageTimestamp: 1_700_000_000 }] });
+  assert.equal(t.db.getContact(CUSTOMER).paused, null);
 });
 
-test('بيتجاهل الجروبات والـ Status والرسايل القديمة ورسايل المزامنة', async () => {
+test('بيتجاهل الجروبات والـ Status والرسايل القديمة والمزامنة', async () => {
   const t = setup();
   await t.incoming('شحن', { jid: '120363000000000000@g.us' });
   await t.incoming('شحن', { jid: 'status@broadcast' });
@@ -194,7 +105,13 @@ test('بيتجاهل الجروبات والـ Status والرسايل القد�
   assert.equal(t.sent.length, 0);
 });
 
-test('حد أقصى للردود في الدقيقة لكل محادثة', async () => {
+test('صورة عليها كلام → بيرد على الكلام', async () => {
+  const t = setup();
+  await t.incoming('', { message: { imageMessage: { caption: 'الشحن؟' } } });
+  assert.deepEqual(t.toCustomer(), ['SHIPPING']);
+});
+
+test('حد أقصى للردود في الدقيقة', async () => {
   const t = setup({ maxRepliesPerMinute: 2 });
   for (let i = 0; i < 5; i++) await t.incoming('شحن');
   assert.equal(t.toCustomer().length, 2);
@@ -205,32 +122,10 @@ test('حد أقصى للردود في الدقيقة لكل محادثة', async
 
 test('رسايل نفس العميل بتترد بالترتيب حتى لو وصلت مع بعض', async () => {
   const t = setup();
-  await Promise.all([t.incoming('اهلا'), t.incoming('شحن')]);
-  assert.deepEqual(t.toCustomer(), ['أهلاً في ORMA', 'SHIPPING']);
-});
-
-test('hybrid: لو الكلمات ما لقتش، يسأل الـ LLM؛ ولو الـ LLM وقع يكمّل عادي', async () => {
-  const llm = async (text) => (text.includes('crash') ? Promise.reject(new Error('down')) : { type: 'answer', text: 'LLM', intents: ['llm'] });
-  const responder = createHybridResponder(createKeywordResponder(), llm, { warn() {} });
-  const t = setup({ responder });
-  await t.incoming('شحن');
-  await t.incoming('سؤال غريب');
-  await t.incoming('crash');
-  assert.deepEqual(t.toCustomer(), ['SHIPPING', 'LLM', 'FALLBACK']);
-});
-
-test('زرار إيقاف البوت من الصفحة: البوت ما يردش على حد', async () => {
-  const t = setup();
-  t.state.setGlobalPaused(true);
-  await t.incoming('شحن');
-  assert.deepEqual(t.toCustomer(), []);
-  t.state.setGlobalPaused(false);
-  await t.incoming('شحن');
-  assert.deepEqual(t.toCustomer(), ['SHIPPING']);
-});
-
-test('اسم العميل ورقمه بيتحفظوا مع التحويل (عشان يظهروا في الصفحة)', async () => {
-  const t = setup();
-  await t.incoming('موظف');
-  assert.equal(t.state.pausedInfo(CUSTOMER).label, 'Sara +201000000001');
+  await Promise.all([t.incoming('شحن 1'), t.incoming('شحن 2')]);
+  assert.equal(t.toCustomer().length, 2);
+  assert.deepEqual(
+    t.db.getContact(CUSTOMER).messages.map((m) => m.text),
+    ['شحن 1', 'SHIPPING', 'شحن 2', 'SHIPPING']
+  );
 });

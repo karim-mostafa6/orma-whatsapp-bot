@@ -5,3 +5,12 @@ auth/
 data/state.json
 *.tmp
 *.log
+web/dist/
+data/settings.json
+data/flows.json
+data/contacts.json
+data/runs.json
+data/session.key
+data/*.tmp
+data/*.broken-*
+.npm-cache/
